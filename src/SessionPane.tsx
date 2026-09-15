@@ -51,8 +51,8 @@ const toolSummary = (input: any) => (typeof input?.command === "string" ? input.
 const PASTE_LINES = 6;
 const PASTE_CHARS = 600;
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
-// ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
-const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
+// Context window comes from result.modelUsage[*].contextWindow after the first turn; 200k until then.
+const DEFAULT_CTX = 200_000;
 const toMsgs = (hist: { role: string; text: string }[]): Msg[] =>
   hist.map((h) => (h.role === "tool" ? { role: "tool", id: crypto.randomUUID(), name: h.text.replace(/^▶ /, ""), input: {}, result: "", text: h.text } : { role: h.role as "user" | "assistant", text: h.text }));
 const THREAD_W = 420;
@@ -121,7 +121,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
   const lastText = useRef("");
   const sessionId = useRef<string | undefined>(resumeProp);
-  const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number }>({ model: "", cwd: "", commands: [], cost: 0 });
+  const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number; ctx: number }>({ model: "", cwd: "", commands: [], cost: 0, ctx: DEFAULT_CTX });
   const streaming = useRef("");
   const listRef = useRef<HTMLDivElement>(null);
   const started = msgs.length > 0;
@@ -145,7 +145,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       model: { id: i.model, display_name: i.model.replace(/^claude-/, "").replace(/-\d.*$/, "") },
       workspace: { current_dir: i.cwd, project_dir: i.cwd },
       cost: { total_cost_usd: i.cost },
-      context_window: { context_window_size: ctxSize(i.model), used_percentage: (used / ctxSize(i.model)) * 100 },
+      context_window: { context_window_size: i.ctx, used_percentage: (used / i.ctx) * 100 },
       rate_limits: {
         five_hour: w.five_hour && { used_percentage: w.five_hour.utilization * 100, resets_at: w.five_hour.resetsAt },
         seven_day: w.seven_day && { used_percentage: w.seven_day.utilization * 100, resets_at: w.seven_day.resetsAt },
@@ -255,7 +255,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           onState?.({ resume: ev.session_id });
           onDone?.(lastText.current);
           info.current.cost += ev.total_cost_usd ?? 0;
-          if (ev.usage) info.current.usage = ev.usage;
+          // result.usage sums every API call of the turn, so context comes from the last assistant message (set above);
+          // modelUsage carries the real context window size
+          const mu = Object.values(ev.modelUsage ?? {}) as any[];
+          const cw = Math.max(0, ...mu.map((m) => m?.contextWindow ?? 0));
+          if (cw) info.current.ctx = cw;
           setBusy(false);
           refreshStatus();
           break;
