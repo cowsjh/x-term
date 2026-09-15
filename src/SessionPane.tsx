@@ -35,7 +35,18 @@ function Pre(props: React.ComponentProps<"pre">) {
     </div>
   );
 }
-const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex], components: { pre: Pre } };
+/** Inline code: click to copy. Block code keeps its own copy button via Pre. */
+function Code(props: React.ComponentProps<"code">) {
+  const [ok, setOk] = useState(false);
+  const text = String(props.children ?? "");
+  if (text.includes("\n")) return <code {...props} />;
+  return <code {...props} className={`${props.className ?? ""} inline ${ok ? "copied" : ""}`} title="click to copy"
+    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 800); }} />;
+}
+const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex], components: { pre: Pre, code: Code } };
+// Long multi-line pastes become a chip (like the CLI's "[Pasted text #N]") and are expanded back into the prompt on send
+const PASTE_LINES = 6;
+const PASTE_CHARS = 600;
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
 // ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
@@ -83,6 +94,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
+  const [pastes, setPastes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [cwd, setCwd] = useState(cwdProp ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
@@ -305,7 +317,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   };
 
   const send = async () => {
-    const text = input.trim();
+    const text = input.replace(/\[Pasted text #(\d+)[^\]]*\]/g, (m, n) => pastes[Number(n) - 1] ?? m).trim();
     if (!text && !images.length) return;
     if (/^\/resume\b/.test(text)) { // CLI's /resume is an interactive picker; unavailable in -p mode
       setInput(""); setSlash([]);
@@ -316,7 +328,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     if (text) { const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]").filter((x: string) => x !== text); h.push(text); localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-100))); }
     histPos.current = -1;
     setMsgs((m) => [...m, { role: "user", text, images }]);
-    setInput(""); setImages([]); setBusy(true); setSlash([]); setAtBottom(true);
+    setInput(""); setImages([]); setPastes([]); setBusy(true); setSlash([]); setAtBottom(true);
     await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
   };
 
@@ -359,6 +371,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
+    const t = e.clipboardData.getData("text/plain");
+    const lines = t.split("\n").length;
+    if (!e.clipboardData.files.length && (lines > PASTE_LINES || t.length > PASTE_CHARS)) {
+      e.preventDefault();
+      const ta = e.currentTarget as HTMLTextAreaElement;
+      const chip = `[Pasted text #${pastes.length + 1}: ${lines} lines] `;
+      setPastes((p) => [...p, t]);
+      setInput(ta.value.slice(0, ta.selectionStart) + chip + ta.value.slice(ta.selectionEnd));
+      return;
+    }
     for (const f of Array.from(e.clipboardData.files)) {
       if (!f.type.startsWith("image/")) continue;
       e.preventDefault();
@@ -425,6 +447,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         document.body,
       ))}
       <div className="composer">
+        {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => <span key={i} className="chip" title={p.slice(0, 500)} onClick={() => { setPastes((x) => x.filter((_, j) => j !== i)); setInput((v) => v.replace(new RegExp(`\\[Pasted text #${i + 1}[^\\]]*\\] ?`), "")); }}>#{i + 1}: {p.split("\n").length} lines ✕</span>)}</div>}
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
         {perm && (
           <div className="perm">
