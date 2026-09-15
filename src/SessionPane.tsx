@@ -1,18 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { IDockviewPanelProps } from "dockview-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { openSession } from "./App";
+import { ansiToHtml } from "./ansi";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
 type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
 
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
+const LAST_CWD = "x-term.lastCwd";
+// ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
+const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
 
 export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
   const id = api.id;
@@ -20,28 +25,65 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   const [input, setInput] = useState(params.quote ? `> ${params.quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState(params.resume ? `forked from ${params.resume.slice(0, 8)}` : "new session");
+  const [cwd, setCwd] = useState(params.cwd ?? localStorage.getItem(LAST_CWD) ?? "");
+  const [gen, setGen] = useState(0); // bump to restart the claude process
+  const [statusHtml, setStatusHtml] = useState("");
   const [ask, setAsk] = useState<{ x: number; y: number; text: string } | null>(null);
-  const sessionId = useRef<string | undefined>(undefined);
+  const [slash, setSlash] = useState<string[]>([]);
+  const [slashIdx, setSlashIdx] = useState(0);
+  const sessionId = useRef<string | undefined>(params.resume);
+  const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number }>({ model: "", cwd: "", commands: [], cost: 0 });
   const streaming = useRef("");
   const listRef = useRef<HTMLDivElement>(null);
+  const started = msgs.length > 0;
 
-  // append or replace trailing assistant message
   const setAssistant = (text: string) =>
     setMsgs((m) => {
       const last = m[m.length - 1];
       return last?.role === "assistant" ? [...m.slice(0, -1), { role: "assistant", text }] : [...m, { role: "assistant", text }];
     });
 
+  const refreshStatus = async () => {
+    const i = info.current;
+    const u = i.usage ?? {};
+    const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+    const w = i.rate?.unifiedWindows ?? {};
+    const payload = {
+      hook_event_name: "Status",
+      session_id: sessionId.current,
+      cwd: i.cwd,
+      model: { id: i.model, display_name: i.model.replace(/^claude-/, "").replace(/-\d.*$/, "") },
+      workspace: { current_dir: i.cwd, project_dir: i.cwd },
+      cost: { total_cost_usd: i.cost },
+      context_window: { context_window_size: ctxSize(i.model), used_percentage: (used / ctxSize(i.model)) * 100 },
+      rate_limits: {
+        five_hour: w.five_hour && { used_percentage: w.five_hour.utilization * 100, resets_at: w.five_hour.resetsAt },
+        seven_day: w.seven_day && { used_percentage: w.seven_day.utilization * 100, resets_at: w.seven_day.resetsAt },
+      },
+    };
+    setStatusHtml(ansiToHtml(await invoke<string>("run_statusline", { json: JSON.stringify(payload) })));
+  };
+
+  useEffect(() => {
+    if (!cwd) invoke<string>("home_dir").then(setCwd);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     const unlisten = listen<{ id: string; line: string }>("session-event", ({ payload }) => {
-      if (payload.id !== id) return;
+      if (payload.id !== id || !alive) return;
       let ev: any;
       try { ev = JSON.parse(payload.line); } catch { return; }
       switch (ev.type) {
         case "system":
-          if (ev.subtype === "init") { sessionId.current = ev.session_id; setStatus(`${ev.model} · ${ev.session_id.slice(0, 8)}`); }
+          if (ev.subtype === "init") {
+            sessionId.current = ev.session_id;
+            info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: ev.slash_commands ?? [] };
+            refreshStatus();
+          }
+          break;
+        case "rate_limit_event":
+          info.current.rate = ev.rate_limit_info;
           break;
         case "stream_event": {
           const d = ev.event;
@@ -57,9 +99,12 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
           break;
         }
         case "assistant":
+          if (ev.message?.usage) info.current.usage = ev.message.usage;
           for (const b of ev.message?.content ?? []) {
             if (b.type === "tool_use")
               setMsgs((m) => [...m.filter((x) => x.text !== `▶ ${b.name}`), { role: "tool", text: `▶ ${b.name} ${JSON.stringify(b.input).slice(0, 300)}` }]);
+            // slash commands (e.g. /context) come back as a full text block without deltas
+            if (b.type === "text" && !streaming.current) setAssistant(b.text);
           }
           break;
         case "user":
@@ -72,31 +117,60 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
           break;
         case "result":
           sessionId.current = ev.session_id;
+          info.current.cost += ev.total_cost_usd ?? 0;
+          if (ev.usage) info.current.usage = ev.usage;
           setBusy(false);
-          setStatus(`${ev.session_id.slice(0, 8)} · $${(ev.total_cost_usd ?? 0).toFixed(3)} · ${ev.num_turns} turns`);
+          refreshStatus();
           break;
         case "stderr":
           setMsgs((m) => [...m, { role: "err", text: ev.text }]);
           break;
         case "exit":
           setBusy(false);
-          setStatus("exited");
+          setStatusHtml("exited");
           break;
       }
     });
-    invoke("start_session", { id, cwd: params.cwd ?? null, resume: params.resume ?? null, fork: !!params.fork, permissionMode: "acceptEdits" })
+    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!params.fork, permissionMode: "acceptEdits" })
       .catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
     return () => { alive = false; unlisten.then((f) => f()); invoke("stop_session", { id }); };
-  }, [id]);
+  }, [id, gen]);
 
   useEffect(() => { listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
+
+  const applyCwd = (dir: string) => {
+    if (!dir || dir === cwd) return;
+    setCwd(dir);
+    localStorage.setItem(LAST_CWD, dir);
+    if (!started) setGen((g) => g + 1); // restart process in new dir; after first message cwd is fixed
+  };
+  const pickDir = async () => {
+    const d = await open({ directory: true, defaultPath: cwd || undefined });
+    if (typeof d === "string") applyCwd(d);
+  };
 
   const send = async () => {
     const text = input.trim();
     if (!text && !images.length) return;
     setMsgs((m) => [...m, { role: "user", text, images }]);
-    setInput(""); setImages([]); setBusy(true);
+    setInput(""); setImages([]); setBusy(true); setSlash([]);
     await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
+  };
+
+  const onInput = (v: string) => {
+    setInput(v);
+    const m = /^\/(\S*)$/.exec(v);
+    setSlash(m ? info.current.commands.filter((c) => c.startsWith(m[1])).slice(0, 12) : []);
+    setSlashIdx(0);
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (slash.length) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx((i) => (i + 1) % slash.length); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx((i) => (i - 1 + slash.length) % slash.length); return; }
+      if (e.key === "Tab" || (e.key === "Enter" && input !== `/${slash[slashIdx]}`)) { e.preventDefault(); setInput(`/${slash[slashIdx]} `); setSlash([]); return; }
+      if (e.key === "Escape") { setSlash([]); return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
@@ -113,15 +187,18 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     const sel = window.getSelection()?.toString().trim();
     setAsk(sel ? { x: e.clientX, y: e.clientY - 30, text: sel } : null);
   };
-
   const followUp = () => {
     if (!ask) return;
-    openSession(containerApi, { resume: sessionId.current, fork: true, quote: ask.text, title: `↳ ${api.title}` }, id);
+    openSession(containerApi, { resume: sessionId.current, fork: true, quote: ask.text, title: `↳ ${api.title}`, cwd }, id);
     setAsk(null);
   };
 
   return (
     <div className="pane">
+      <div className="cwdbar">
+        <input value={cwd} disabled={started} onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
+        <button disabled={started} onClick={pickDir} title="Choose folder">📁</button>
+      </div>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp}>
         {msgs.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
@@ -133,14 +210,21 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
       </div>
       <div className="composer">
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
+        {slash.length > 0 && (
+          <ul className="slash">
+            {slash.map((c, i) => <li key={c} className={i === slashIdx ? "sel" : ""} onMouseDown={() => { setInput(`/${c} `); setSlash([]); }}>/{c}</li>)}
+          </ul>
+        )}
         <textarea
           value={input}
-          placeholder={busy ? "working…" : "Message (Enter to send, Shift+Enter newline, paste images)"}
-          onChange={(e) => setInput(e.target.value)}
+          placeholder={busy ? "working…" : "Message (Enter send, Shift+Enter newline, / commands, paste images)"}
+          onChange={(e) => onInput(e.target.value)}
           onPaste={onPaste}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          onKeyDown={onKey}
         />
-        <div className="status">{status}{busy ? " · ⏳" : ""}</div>
+        <div className="status">
+          <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />{busy ? " ⏳" : ""}
+        </div>
       </div>
     </div>
   );

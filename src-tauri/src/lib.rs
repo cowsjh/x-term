@@ -54,9 +54,8 @@ fn start_session(
     if let Some(m) = &permission_mode {
         cmd.args(["--permission-mode", m]);
     }
-    if let Some(d) = &cwd {
-        cmd.current_dir(d);
-    }
+    let cwd = cwd.filter(|d| !d.is_empty()).unwrap_or_else(|| std::env::var("HOME").unwrap_or("/".into()));
+    cmd.current_dir(&cwd);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -114,6 +113,25 @@ fn send_message(
     s.stdin.flush().map_err(|e| e.to_string())
 }
 
+/// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
+#[tauri::command]
+fn run_statusline(json: String) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cmd = std::fs::read_to_string(format!("{home}/.claude/settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["statusLine"]["command"].as_str().map(String::from));
+    let Some(cmd) = cmd else { return String::new() };
+    let Ok(mut child) = Command::new("sh").args(["-c", &cmd]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return String::new() };
+    let _ = child.stdin.take().unwrap().write_all(json.as_bytes());
+    child.wait_with_output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+}
+
+#[tauri::command]
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
 #[tauri::command]
 fn stop_session(state: State<Sessions>, id: String) {
     if let Some(mut s) = state.0.lock().unwrap().remove(&id) {
@@ -126,8 +144,9 @@ fn stop_session(state: State<Sessions>, id: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, run_statusline, home_dir])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

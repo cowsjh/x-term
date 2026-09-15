@@ -12,7 +12,14 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .composer { border-top: 1px solid #333; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
 .composer textarea { width: 100%; box-sizing: border-box; min-height: 60px; background: #111; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 6px; resize: vertical; font: inherit; }
 .thumbs { display: flex; flex-wrap: wrap; }
-.status { font-size: 11px; color: #888; }
 .hdr-btn { background: none; border: none; color: #ccc; font-size: 16px; cursor: pointer; padding: 0 8px; }
 .hdr-btn:hover { color: #fff; }
 .ask-btn { position: fixed; z-index: 10; background: #3b6ea5; color: #fff; border: none; border-radius: 4px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
+.cwdbar { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid #333; }
+.cwdbar input { flex: 1; background: #111; color: #aaa; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font: 12px ui-monospace, monospace; }
+.cwdbar button { background: none; border: 1px solid #333; border-radius: 4px; color: #ccc; cursor: pointer; }
+.cwdbar button:disabled, .cwdbar input:disabled { opacity: .5; cursor: default; }
+.status { font: 12px ui-monospace, monospace; white-space: pre; overflow-x: auto; }
+.slash { list-style: none; margin: 0; padding: 4px 0; background: #222; border: 1px solid #444; border-radius: 4px; max-height: 200px; overflow-y: auto; font: 13px ui-monospace, monospace; }
+.slash li { padding: 2px 8px; cursor: pointer; }
+.slash li.sel, .slash li:hover { background: #3b6ea5; }
