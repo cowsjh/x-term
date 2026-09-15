@@ -21,6 +21,7 @@ const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only af
 // ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
 const THREAD_W = 420;
+const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 
 export function SessionPane({ api, params }: IDockviewPanelProps<SessionParams>) {
   return <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} />;
@@ -231,7 +232,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   const openThread = () => {
     if (!ask) return;
     const maxX = Math.max(0, window.innerWidth - THREAD_W - 8);
-    setThreads((t) => [...t, { id: crypto.randomUUID(), x: Math.min(ask.ax, maxX), y: ask.ay, quote: ask.text, resume: sessionId.current, open: true }]);
+    const maxY = Math.max(0, window.innerHeight - THREAD_H - 8);
+    setThreads((t) => [...t, { id: crypto.randomUUID(), x: Math.min(ask.ax, maxX), y: Math.min(ask.ay, maxY), quote: ask.text, resume: sessionId.current, open: true }]);
     setAsk(null);
     window.getSelection()?.removeAllRanges();
   };
