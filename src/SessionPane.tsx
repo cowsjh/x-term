@@ -15,6 +15,8 @@ type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?:
 
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
 // ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
+const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
+type SessionInfo = { id: string; mtime: number; summary: string };
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
 
 export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
@@ -29,6 +31,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   const [ask, setAsk] = useState<{ x: number; y: number; text: string } | null>(null);
   const [slash, setSlash] = useState<string[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
+  const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const sessionId = useRef<string | undefined>(params.resume);
   const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number }>({ model: "", cwd: "", commands: [], cost: 0 });
   const streaming = useRef("");
@@ -67,6 +70,14 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   }, []);
 
   useEffect(() => {
+    if (!cwd) return;
+    invoke<string[]>("list_skills", { cwd }).then((sk) => {
+      const builtins: string[] = JSON.parse(localStorage.getItem(BUILTINS) ?? "[]");
+      info.current.commands = [...new Set([...sk, ...builtins])].sort();
+    });
+  }, [cwd]);
+
+  useEffect(() => {
     let alive = true;
     const unlisten = listen<{ id: string; line: string }>("session-event", ({ payload }) => {
       if (payload.id !== id || !alive) return;
@@ -76,7 +87,8 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
         case "system":
           if (ev.subtype === "init") {
             sessionId.current = ev.session_id;
-            info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: ev.slash_commands ?? [] };
+            info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
+            localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
             refreshStatus();
           }
           break;
@@ -147,9 +159,23 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     if (!started) setGen((g) => g + 1); // restart process in new dir; after first message cwd is fixed
   };
 
+  const resume = async (sess: SessionInfo) => {
+    setSessions(null);
+    sessionId.current = sess.id;
+    const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
+    setMsgs(hist.map((h) => ({ role: h.role as Msg["role"], text: h.text })));
+    info.current.cost = 0;
+    setGen((g) => g + 1); // restart process with --resume
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text && !images.length) return;
+    if (/^\/resume\b/.test(text)) { // CLI's /resume is an interactive picker; unavailable in -p mode
+      setInput(""); setSlash([]);
+      setSessions(await invoke<SessionInfo[]>("list_sessions", { cwd }));
+      return;
+    }
     setMsgs((m) => [...m, { role: "user", text, images }]);
     setInput(""); setImages([]); setBusy(true); setSlash([]);
     await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
@@ -204,6 +230,13 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
       </div>
       <div className="composer">
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
+        {sessions && (
+          <ul className="slash">
+            {sessions.length === 0 && <li>no sessions for {cwd}</li>}
+            {sessions.map((s) => <li key={s.id} onMouseDown={() => resume(s)}>{new Date(s.mtime * 1000).toLocaleString()} · {s.id.slice(0, 8)} · {s.summary}</li>)}
+            <li onMouseDown={() => setSessions(null)}>✕ cancel</li>
+          </ul>
+        )}
         {slash.length > 0 && (
           <ul className="slash">
             {slash.map((c, i) => <li key={c} className={i === slashIdx ? "sel" : ""} onMouseDown={() => { setInput(`/${c} `); setSlash([]); }}>/{c}</li>)}

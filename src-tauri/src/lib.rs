@@ -135,6 +135,95 @@ fn initial_cwd() -> String {
         .unwrap_or_default()
 }
 
+fn home() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
+/// ~/.claude/projects/<cwd with non-alphanumerics replaced by '-'>
+fn project_dir(cwd: &str) -> std::path::PathBuf {
+    let enc: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    std::path::PathBuf::from(format!("{}/.claude/projects/{enc}", home()))
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    id: String,
+    mtime: u64,
+    summary: String,
+}
+
+/// Past sessions for `cwd`, newest first. Summary = last recorded prompt.
+#[tauri::command]
+fn list_sessions(cwd: String) -> Vec<SessionInfo> {
+    let Ok(rd) = std::fs::read_dir(project_dir(&cwd)) else { return vec![] };
+    let mut out: Vec<SessionInfo> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| {
+            let id = e.path().file_stem()?.to_string_lossy().into_owned();
+            let mtime = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            let text = std::fs::read_to_string(e.path()).ok()?;
+            let summary = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter_map(|v| v["lastPrompt"].as_str().or_else(|| v["message"]["content"].as_str()).map(|t| t.chars().take(80).collect::<String>()))
+                .last()
+                .unwrap_or_default();
+            Some(SessionInfo { id, mtime, summary })
+        })
+        .collect();
+    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out
+}
+
+#[derive(Serialize)]
+struct TranscriptMsg {
+    role: String,
+    text: String,
+}
+
+/// User/assistant text of a stored session, for showing history when resuming.
+#[tauri::command]
+fn load_transcript(cwd: String, id: String) -> Vec<TranscriptMsg> {
+    let path = project_dir(&cwd).join(format!("{id}.jsonl"));
+    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
+    let mut out = vec![];
+    for v in text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        let role = v["type"].as_str().unwrap_or("");
+        if role != "user" && role != "assistant" || v["isMeta"].as_bool() == Some(true) {
+            continue;
+        }
+        let content = &v["message"]["content"];
+        if let Some(t) = content.as_str() {
+            out.push(TranscriptMsg { role: role.into(), text: t.into() });
+            continue;
+        }
+        for b in content.as_array().into_iter().flatten() {
+            match b["type"].as_str() {
+                Some("text") => out.push(TranscriptMsg { role: role.into(), text: b["text"].as_str().unwrap_or("").into() }),
+                Some("tool_use") => out.push(TranscriptMsg { role: "tool".into(), text: format!("▶ {}", b["name"].as_str().unwrap_or("")) }),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Slash commands from user-level and project-level skills/commands dirs (CLI only reports its list after the first turn).
+#[tauri::command]
+fn list_skills(cwd: String) -> Vec<String> {
+    let mut out = vec![];
+    for base in [home(), cwd] {
+        if let Ok(rd) = std::fs::read_dir(format!("{base}/.claude/skills")) {
+            out.extend(rd.filter_map(|e| e.ok()).filter(|e| e.path().join("SKILL.md").exists()).map(|e| e.file_name().to_string_lossy().into_owned()));
+        }
+        if let Ok(rd) = std::fs::read_dir(format!("{base}/.claude/commands")) {
+            out.extend(rd.filter_map(|e| e.ok()).filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned())));
+        }
+    }
+    out
+}
+
 #[tauri::command]
 fn stop_session(state: State<Sessions>, id: String) {
     if let Some(mut s) = state.0.lock().unwrap().remove(&id) {
@@ -148,7 +237,25 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, run_statusline, initial_cwd])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs a real ~/.claude/projects entry; run with X_TERM_TEST_CWD=<project dir that has skills and sessions>.
+    #[test]
+    fn sessions_and_skills_from_claude_dir() {
+        let Ok(cwd) = std::env::var("X_TERM_TEST_CWD") else { return };
+        assert!(!list_skills(cwd.clone()).is_empty());
+        let ss = list_sessions(cwd.clone());
+        assert!(!ss.is_empty());
+        assert!(ss.windows(2).all(|w| w[0].mtime >= w[1].mtime), "newest first");
+        let tr = load_transcript(cwd, ss[0].id.clone());
+        assert!(tr.iter().any(|m| m.role == "user"), "transcript has user text");
+        assert!(tr.iter().all(|m| !m.text.is_empty() || m.role == "tool"));
+    }
 }
