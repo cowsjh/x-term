@@ -3,6 +3,7 @@ import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, ID
 import { SessionPane, SessionParams } from "./SessionPane";
 
 let counter = 0;
+const LAYOUT_KEY = "x-term.layout"; // dockview layout incl. per-pane params (cwd, session id, title) -> restored on launch
 
 export function openSession(api: DockviewApi, params: SessionParams, referencePanel?: string, direction: "right" | "below" = "right") {
   const id = crypto.randomUUID();
@@ -31,7 +32,10 @@ export default function App() {
   const apiRef = useRef<DockviewApi>(null);
   const onReady = (e: DockviewReadyEvent) => {
     apiRef.current = e.api;
-    openSession(e.api, {});
+    const saved = localStorage.getItem(LAYOUT_KEY);
+    try { if (saved) e.api.fromJSON(JSON.parse(saved)); } catch { localStorage.removeItem(LAYOUT_KEY); }
+    if (!e.api.panels.length) openSession(e.api, {});
+    e.api.onDidLayoutChange(() => localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON())));
   };
   useEffect(() => {
     // Alt+[ : split vertically (new pane to the right), Alt+] : split horizontally (new pane below)

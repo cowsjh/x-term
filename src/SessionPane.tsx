@@ -7,6 +7,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { ansiToHtml } from "./ansi";
 import { ToolCard, ToolMsg } from "./ToolCard";
 
@@ -24,18 +25,47 @@ const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehype
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
 // ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
+const toMsgs = (hist: { role: string; text: string }[]): Msg[] =>
+  hist.map((h) => (h.role === "tool" ? { role: "tool", id: crypto.randomUUID(), name: h.text.replace(/^▶ /, ""), input: {}, result: "", text: h.text } : { role: h.role as "user" | "assistant", text: h.text }));
 const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 
-export function SessionPane({ api, params }: IDockviewPanelProps<SessionParams>) {
-  return <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} />;
+export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
+  const [unread, setUnread] = useState(false);
+  useEffect(() => {
+    const d = api.onDidActiveChange(({ isActive }) => { if (isActive) setUnread(false); });
+    return () => d.dispose();
+  }, [api]);
+  useEffect(() => { api.setTitle((unread ? "● " : "") + (params.title ?? api.title ?? "").replace(/^● /, "")); }, [unread, params.title]);
+  const onState: ChatProps["onState"] = (st) => {
+    // keep session id / cwd / title in panel params so the saved layout can resume this pane
+    api.updateParameters({ ...params, ...st, fork: false, quote: undefined });
+    if (st.title && st.title !== params.title) api.setTitle(st.title);
+    localStorage.setItem("x-term.layout", JSON.stringify(containerApi.toJSON())); // param changes do not fire onDidLayoutChange
+  };
+  const onDone = (text: string) => {
+    if (api.isActive && document.hasFocus()) return;
+    setUnread(true);
+    notify(params.title ?? api.title ?? "x-term", text.slice(0, 120));
+  };
+  return <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} />;
 }
 
-type ChatProps = { id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean };
+async function notify(title: string, body: string) {
+  let ok = await isPermissionGranted();
+  if (!ok) ok = (await requestPermission()) === "granted";
+  if (ok) sendNotification({ title, body });
+}
+
+type ChatProps = {
+  id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean;
+  onState?: (s: { cwd?: string; resume?: string; title?: string }) => void; // session id / cwd / title changed
+  onDone?: (lastText: string) => void; // a turn finished
+};
 
 /** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
-function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: ChatProps) {
+function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone }: ChatProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
@@ -51,6 +81,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
+  const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
+  const lastText = useRef("");
   const sessionId = useRef<string | undefined>(resumeProp);
   const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number }>({ model: "", cwd: "", commands: [], cost: 0 });
   const streaming = useRef("");
@@ -90,6 +122,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   }, []);
 
   useEffect(() => {
+    if (resumeProp && !fork && cwd) invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: resumeProp }).then((hist) => { if (hist.length) setMsgs(toMsgs(hist)); });
+  }, []);
+
+  useEffect(() => {
     if (!cwd) return;
     invoke<string[]>("list_skills", { cwd }).then((sk) => {
       const builtins: string[] = JSON.parse(localStorage.getItem(BUILTINS) ?? "[]");
@@ -107,6 +143,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
         case "system":
           if (ev.subtype === "init") {
             sessionId.current = ev.session_id;
+            onState?.({ cwd: ev.cwd, resume: ev.session_id });
             info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
             localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
             refreshStatus();
@@ -135,6 +172,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
             setMsgs((m) => [...m, { role: "tool", id: b.id, name: b.name, input: b.input, text: b.name }]);
           } else if (d.type === "content_block_delta" && d.delta?.type === "text_delta") {
             streaming.current += d.delta.text;
+            lastText.current = streaming.current;
             setAssistant(streaming.current);
           } else if (d.type === "content_block_stop") {
             streaming.current = "";
@@ -162,6 +200,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           break;
         case "result":
           sessionId.current = ev.session_id;
+          onState?.({ resume: ev.session_id });
+          onDone?.(lastText.current);
           info.current.cost += ev.total_cost_usd ?? 0;
           if (ev.usage) info.current.usage = ev.usage;
           setBusy(false);
@@ -181,7 +221,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     return () => { alive = false; unlisten.then((f) => f()); invoke("stop_session", { id }); };
   }, [id, gen]);
 
-  useEffect(() => { listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
+  useEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    setScrollTop(el.scrollTop);
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+  };
   const taRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (!compact) return;
@@ -218,7 +263,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     setSessions(null);
     sessionId.current = sess.id;
     const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
-    setMsgs(hist.map((h) => (h.role === "tool" ? { role: "tool", id: crypto.randomUUID(), name: h.text.replace(/^▶ /, ""), input: {}, result: "", text: h.text } : { role: h.role as "user" | "assistant", text: h.text })));
+    setMsgs(toMsgs(hist));
+    onState?.({ resume: sess.id, title: sess.summary.slice(0, 30) });
     setThreads([]); // threads belong to the previous conversation
     info.current.cost = 0;
     setGen((g) => g + 1); // restart process with --resume
@@ -232,8 +278,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
       setSessions(await invoke<SessionInfo[]>("list_sessions", { cwd }));
       return;
     }
+    if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
     setMsgs((m) => [...m, { role: "user", text, images }]);
-    setInput(""); setImages([]); setBusy(true); setSlash([]);
+    setInput(""); setImages([]); setBusy(true); setSlash([]); setAtBottom(true);
     await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
   };
 
@@ -297,13 +344,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
 
   return (
     <div className={`pane ${compact ? "compact" : ""}`}>
-      <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
+      <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll}>
         {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : (
           <div key={i} className={`msg ${m.role}`}>
             {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} />)}
             {m.role === "err" ? m.text : <Markdown {...plugins}>{m.text}</Markdown>}
           </div>
         ))}
+        {!atBottom && <button className="to-bottom" onClick={() => { setAtBottom(true); listRef.current?.scrollTo(0, listRef.current.scrollHeight); }}>↓</button>}
         {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>}
       </div>
       {placed.map(({ t, x, y, showBody }) => createPortal(

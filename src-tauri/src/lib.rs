@@ -250,6 +250,7 @@ fn stop_session(state: State<Sessions>, id: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
         .run(tauri::generate_context!())
