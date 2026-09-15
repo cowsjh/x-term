@@ -108,6 +108,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           break;
         case "conversation_reset": // `/clear`: CLI starts a fresh session in the same process
           setMsgs([]);
+          setThreads([]);
           info.current.cost = 0;
           info.current.usage = undefined;
           break;
@@ -186,6 +187,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     sessionId.current = sess.id;
     const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
     setMsgs(hist.map((h) => ({ role: h.role as Msg["role"], text: h.text })));
+    setThreads([]); // threads belong to the previous conversation
     info.current.cost = 0;
     setGen((g) => g + 1); // restart process with --resume
   };
