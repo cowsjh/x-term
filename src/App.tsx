@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, themeDark } from "dockview-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { SessionPane, SessionParams } from "./SessionPane";
 import { TermPane, TermParams } from "./TermPane";
 
@@ -54,11 +55,18 @@ export default function App() {
     });
     return () => { window.removeEventListener("keydown", onKey); drop.then((f) => f()); };
   }, []);
+  const win = getCurrentWindow();
   return (
-    <DockviewReact
-      theme={themeDark}
-      components={components}
-      onReady={onReady}
-    />
+    <div className="app">
+      <div className="titlebar" data-tauri-drag-region>
+        <span data-tauri-drag-region>x-term</span>
+        <button onClick={() => win.minimize()}>–</button>
+        <button onClick={() => win.toggleMaximize()}>▢</button>
+        <button onClick={() => win.close()}>×</button>
+      </div>
+      <div className="dock">
+        <DockviewReact theme={themeDark} components={components} onReady={onReady} />
+      </div>
+    </div>
   );
 }

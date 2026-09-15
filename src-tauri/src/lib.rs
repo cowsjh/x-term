@@ -141,6 +141,7 @@ struct Pty {
     master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    pid: Option<u32>,
 }
 
 #[derive(Default)]
@@ -161,7 +162,8 @@ fn pty_open(app: AppHandle, state: State<Ptys>, id: String, cwd: Option<String>,
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    state.0.lock().unwrap().insert(id.clone(), Pty { master: pair.master, writer, child });
+    let pid = child.process_id();
+    state.0.lock().unwrap().insert(id.clone(), Pty { master: pair.master, writer, child, pid });
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 16384];
@@ -203,6 +205,15 @@ fn pty_resize(state: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<()
     let m = state.0.lock().unwrap();
     let p = m.get(&id).ok_or("no pty")?;
     p.master.resize(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())
+}
+
+/// Where the shell is right now (tracks `cd`), via /proc; empty if unknown.
+#[tauri::command]
+fn pty_cwd(state: State<Ptys>, id: String) -> String {
+    let pid = state.0.lock().unwrap().get(&id).and_then(|p| p.pid);
+    pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -358,7 +369,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, account_info, pty_open, pty_write, pty_resize, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, account_info, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

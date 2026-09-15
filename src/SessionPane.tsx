@@ -9,6 +9,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { ToolCard, ToolMsg } from "./ToolCard";
+import { Menu } from "./Menu";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
@@ -82,6 +83,13 @@ const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 
 export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
   const [unread, setUnread] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // right-click on empty chat area -> pane menu; text, inputs and thread windows keep the native menu
+  const onCtx = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest(".msg, textarea, input, select, .thread, .slash, .perm, pre")) return;
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY });
+  };
   useEffect(() => {
     const d = api.onDidActiveChange(({ isActive }) => { if (isActive) setUnread(false); });
     return () => d.dispose();
@@ -98,7 +106,12 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     setUnread(true);
     notify(params.title ?? api.title ?? "x-term", text.slice(0, 120));
   };
-  return <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} />;
+  return (
+    <div className="pane-wrap" onContextMenu={onCtx}>
+      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} />
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[{ label: "Close", key: "c", run: () => api.close() }]} />}
+    </div>
+  );
 }
 
 async function notify(title: string, body: string) {

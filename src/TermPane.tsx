@@ -1,17 +1,25 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IDockviewPanelProps } from "dockview-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
+import { Menu } from "./Menu";
 
 export type TermParams = { cwd?: string };
 const APP_KEYS = new Set(["BracketLeft", "BracketRight", "KeyW"]); // Alt+[ Alt+] Alt+W belong to the app, not the shell
 
 /** A real shell in a pty (xterm.js). Run `claude`, `codex`, anything. Pane closes when the shell exits. */
-export function TermPane({ api, params }: IDockviewPanelProps<TermParams>) {
+export function TermPane({ api, containerApi, params }: IDockviewPanelProps<TermParams>) {
   const ref = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** Swap this pane for a claude chat in the same spot, starting where the shell currently is. */
+  const toAgent = async () => {
+    const cwd = (await invoke<string>("pty_cwd", { id: api.id }).catch(() => "")) || params.cwd;
+    containerApi.addPanel({ id: crypto.randomUUID(), component: "session", title: "claude", params: { cwd }, position: { referencePanel: api.id, direction: "within" } });
+    api.close();
+  };
   useEffect(() => {
     const id = api.id;
     const term = new Terminal({ fontFamily: "ui-monospace, monospace", fontSize: 13, scrollback: 5000, theme: { background: "#1e1e1e" } });
@@ -35,5 +43,10 @@ export function TermPane({ api, params }: IDockviewPanelProps<TermParams>) {
     term.focus();
     return () => { ro.disconnect(); act.dispose(); unData.then((f) => f()); unExit.then((f) => f()); term.dispose(); invoke("pty_close", { id }); };
   }, []);
-  return <div className="term" ref={ref} />;
+  return (
+    <>
+      <div className="term" ref={ref} onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }} />
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[{ label: "Agent mode", key: "a", run: toAgent }, { label: "Close", key: "c", run: () => api.close() }]} />}
+    </>
+  );
 }
