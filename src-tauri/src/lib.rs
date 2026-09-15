@@ -34,6 +34,8 @@ fn start_session(
     resume: Option<String>,
     fork: bool,
     permission_mode: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<(), String> {
     let mut cmd = Command::new("claude");
     cmd.args([
@@ -56,6 +58,12 @@ fn start_session(
     }
     if let Some(m) = &permission_mode {
         cmd.args(["--permission-mode", m]);
+    }
+    if let Some(m) = model.as_deref().filter(|m| !m.is_empty()) {
+        cmd.args(["--model", m]);
+    }
+    if let Some(e) = effort.as_deref().filter(|e| !e.is_empty()) {
+        cmd.args(["--effort", e]);
     }
     let cwd = cwd.filter(|d| !d.is_empty()).unwrap_or_else(|| std::env::var("HOME").unwrap_or("/".into()));
     cmd.current_dir(&cwd);

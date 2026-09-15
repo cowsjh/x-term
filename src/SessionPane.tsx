@@ -18,6 +18,9 @@ type SessionInfo = { id: string; mtime: number; summary: string };
 type Perm = { request_id: string; tool_name: string; input: any; description?: string; permission_suggestions?: any[] };
 const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
 const MODE_KEY = "x-term.permissionMode";
+// "" = CLI default. Before the first message these restart the process with --model/--effort; after, they are sent as /model and /effort.
+const MODELS = ["", "fable", "opus", "sonnet", "haiku"];
+const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
 type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; open: boolean };
@@ -93,6 +96,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
   const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
+  const [model, setModel] = useState(localStorage.getItem("x-term.model") ?? "");
+  const [effort, setEffort] = useState(localStorage.getItem("x-term.effort") ?? "");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
@@ -238,7 +243,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           break;
       }
     });
-    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: mode })
+    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: mode, model, effort })
       .catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
     return () => { alive = false; unlisten.then((f) => f()); invoke("stop_session", { id }); };
   }, [id, gen]);
@@ -272,6 +277,13 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     setMode(m);
     localStorage.setItem(MODE_KEY, m);
     if (started) control({ subtype: "set_permission_mode", mode: m }); // live switch; before the first message the restart below picks it up
+    else setGen((g) => g + 1);
+  };
+
+  const applySetting = (key: "model" | "effort", v: string) => {
+    (key === "model" ? setModel : setEffort)(v);
+    localStorage.setItem(`x-term.${key}`, v);
+    if (started) invoke("send_message", { id, text: `/${key} ${v || "default"}`, images: [] }).catch(() => {});
     else setGen((g) => g + 1);
   };
 
@@ -459,6 +471,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
               <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
               <select className="mode" value={mode} title="Permission mode" onChange={(e) => applyMode(e.target.value)}>
                 {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <select className="mode" value={model} title="Model" onChange={(e) => applySetting("model", e.target.value)}>
+                {MODELS.map((m) => <option key={m} value={m}>{m || "model: default"}</option>)}
+              </select>
+              <select className="mode" value={effort} title="Effort" onChange={(e) => applySetting("effort", e.target.value)}>
+                {EFFORTS.map((m) => <option key={m} value={m}>{m || "effort: default"}</option>)}
               </select>
             </div>
           </>
