@@ -35,11 +35,11 @@ function Diff({ name, input }: { name: string; input: any }) {
 
 export function ToolCard({ m }: { m: ToolMsg }) {
   const [open, setOpen] = useState(false);
-  const preview = (m.result ?? "").split("\n").slice(0, 2).join("\n").slice(0, 200);
+  const lines = (m.result ?? "").split("\n").length;
   return (
     <div className={`msg tool ${m.error ? "error" : ""}`} onClick={() => setOpen((o) => !o)}>
-      <div className="tool-hdr">{open ? "▾" : "▸"} <b>{m.name}</b> <span className="tool-sum">{summary(m.input)}</span>{m.result === undefined ? " …" : ""}</div>
-      {!open && preview && <pre className="tool-res">{preview}{(m.result ?? "").length > preview.length ? " …" : ""}</pre>}
+      <div className="tool-hdr">{open ? "▾" : "▸"} <b>{m.name}</b> <span className="tool-sum">{summary(m.input).split("\n")[0].slice(0, 100)}</span>
+        <span className="tool-meta">{m.result === undefined ? "…" : m.error ? "error" : m.result ? `${lines} lines` : ""}</span></div>
       {open && (
         <div onClick={(e) => e.stopPropagation()}>
           <Diff name={m.name} input={m.input} /> 

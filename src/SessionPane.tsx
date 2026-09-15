@@ -45,6 +45,9 @@ function Code(props: React.ComponentProps<"code">) {
 }
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex], components: { pre: Pre, code: Code } };
 // Long multi-line pastes become a chip (like the CLI's "[Pasted text #N]") and are expanded back into the prompt on send
+const SPIN = ["✻", "✽", "✶", "✳", "✢", "·"];
+const fmtSec = (ms: number) => `${Math.max(0, Math.round(ms / 1000))}s`;
+const toolSummary = (input: any) => (typeof input?.command === "string" ? input.command : input?.file_path ?? input?.pattern ?? input?.description ?? "");
 const PASTE_LINES = 6;
 const PASTE_CHARS = 600;
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
@@ -96,6 +99,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [images, setImages] = useState<Img[]>([]);
   const [pastes, setPastes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [activity, setActivity] = useState(""); // CLI-style status line: what is running right now
+  const [tick, setTick] = useState(0); // 1s re-render while busy for the elapsed counter
+  const turn = useRef({ start: 0, tools: 0, done: "" });
   const [cwd, setCwd] = useState(cwdProp ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
   const [statusHtml, setStatusHtml] = useState("");
@@ -208,10 +214,13 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
             streaming.current = "";
             const b = d.content_block;
+            turn.current.tools++;
+            setActivity(`${b.name}`);
             setMsgs((m) => [...m, { role: "tool", id: b.id, name: b.name, input: b.input, text: b.name }]);
           } else if (d.type === "content_block_delta" && d.delta?.type === "text_delta") {
             streaming.current += d.delta.text;
             lastText.current = streaming.current;
+            setActivity("Writing");
             setAssistant(streaming.current);
           } else if (d.type === "content_block_stop") {
             streaming.current = "";
@@ -221,6 +230,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         case "assistant":
           if (ev.message?.usage) info.current.usage = ev.message.usage;
           for (const b of ev.message?.content ?? []) {
+            if (b.type === "tool_use") setActivity(`${b.name} ${toolSummary(b.input)}`.slice(0, 120));
             if (b.type === "tool_use")
               setMsgs((m) => m.some((x) => x.role === "tool" && x.id === b.id)
                 ? m.map((x) => (x.role === "tool" && x.id === b.id ? { ...x, input: b.input } : x))
@@ -232,6 +242,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         case "user":
           for (const b of ev.message?.content ?? []) {
             if (b.type === "tool_result") {
+              setActivity("Thinking");
               const t = typeof b.content === "string" ? b.content : (b.content ?? []).map((c: any) => c.text ?? "").join("\n");
               setMsgs((m) => m.map((x) => (x.role === "tool" && x.id === b.tool_use_id ? { ...x, result: t, error: !!b.is_error } : x)));
             }
@@ -239,6 +250,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           break;
         case "result":
           sessionId.current = ev.session_id;
+          turn.current.done = `${ev.is_error ? "✗" : "✓"} ${fmtSec(Date.now() - turn.current.start)} · ${turn.current.tools} tools · $${(ev.total_cost_usd ?? 0).toFixed(3)}`;
+          setActivity("");
           onState?.({ resume: ev.session_id });
           onDone?.(lastText.current);
           info.current.cost += ev.total_cost_usd ?? 0;
@@ -251,6 +264,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           break;
         case "exit":
           setBusy(false);
+          setActivity("");
           setStatusHtml("exited");
           break;
       }
@@ -261,6 +275,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   }, [id, gen]);
 
   useEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
+  useEffect(() => {
+    if (!busy) return;
+    const t = setInterval(() => setTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [busy]);
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     setScrollTop(el.scrollTop);
@@ -329,6 +348,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     histPos.current = -1;
     setMsgs((m) => [...m, { role: "user", text, images }]);
     setInput(""); setImages([]); setPastes([]); setBusy(true); setSlash([]); setAtBottom(true);
+    turn.current = { start: Date.now(), tools: 0, done: "" };
+    setActivity("Thinking");
     await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
   };
 
@@ -477,6 +498,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             {files.map((f, i) => <li key={f} className={i === slashIdx ? "sel" : ""} onMouseDown={() => pickFile(f)}>@{f}</li>)}
           </ul>
         )}
+        <div className="activity">
+          {busy ? <><span className="spin">{SPIN[tick % SPIN.length]}</span> {activity || "Thinking"}… <span className="dim">{fmtSec(Date.now() - turn.current.start)} · {turn.current.tools} tools · Esc to interrupt</span></> : <span className="dim">{turn.current.done}</span>}
+        </div>
         <textarea
           ref={taRef}
           value={input}

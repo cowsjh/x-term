@@ -4,7 +4,7 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .msg { margin: 6px 0; padding: 6px 10px; border-radius: 6px; white-space: normal; }
 .msg.user { background: #2a3a55; }
 .msg.assistant { background: #262626; }
-.msg.tool { background: #262a1e; font-family: ui-monospace, monospace; font-size: 12px; cursor: pointer; }
+.msg.tool { background: none; padding: 1px 10px; margin: 1px 0; font-family: ui-monospace, monospace; font-size: 12px; cursor: pointer; }
 .msg.tool.error { background: #3a2222; }
 .msg.err { background: #4a2020; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
 .msg pre { background: #111; padding: 8px; overflow-x: auto; border-radius: 4px; }
@@ -55,3 +55,7 @@ code.inline { cursor: pointer; }
 code.inline:hover { background: #333; }
 code.inline.copied { background: #2a5a2a; }
 .chip { display: inline-block; background: #2a3a55; border: 1px solid #446; border-radius: 10px; padding: 1px 8px; margin: 2px; font-size: 12px; cursor: pointer; }
+.tool-meta { color: #666; margin-left: 8px; }
+.activity { font: 12px ui-monospace, monospace; color: #cbd; padding: 2px 4px; min-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity .spin { color: #e8a; display: inline-block; width: 1em; }
+.activity .dim { color: #777; }
