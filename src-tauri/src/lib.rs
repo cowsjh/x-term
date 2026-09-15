@@ -125,17 +125,14 @@ fn send_message(
 }
 
 /// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
+/// `oauthAccount` from ~/.claude.json (plan / org type for the status bar); Null if unavailable.
 #[tauri::command]
-fn run_statusline(json: String) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let cmd = std::fs::read_to_string(format!("{home}/.claude/settings.json"))
+fn account_info() -> serde_json::Value {
+    std::fs::read_to_string(format!("{}/.claude.json", home()))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v["statusLine"]["command"].as_str().map(String::from));
-    let Some(cmd) = cmd else { return String::new() };
-    let Ok(mut child) = Command::new("sh").args(["-c", &cmd]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return String::new() };
-    let _ = child.stdin.take().unwrap().write_all(json.as_bytes());
-    child.wait_with_output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+        .map(|v| v["oauthAccount"].clone())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Directory new panes start in: first CLI arg if given, else the directory x-term was launched from.
@@ -283,7 +280,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, account_info, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

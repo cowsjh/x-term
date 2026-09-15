@@ -8,7 +8,6 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { ansiToHtml } from "./ansi";
 import { ToolCard, ToolMsg } from "./ToolCard";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
@@ -19,8 +18,27 @@ type Perm = { request_id: string; tool_name: string; input: any; description?: s
 const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
 const MODE_KEY = "x-term.permissionMode";
 // "" = CLI default. Before the first message these restart the process with --model/--effort; after, they are sent as /model and /effort.
-const MODELS = ["", "fable", "opus", "sonnet", "haiku"];
-const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
+// Full ids: the CLI rejects short forms like `opus-4-8[1m]`; `[1m]` = 1M context variant.
+const MODELS = ["", "claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5", "claude-opus-5[1m]", "claude-opus-4-8", "claude-opus-4-8[1m]", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-5[1m]", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
+const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"]; // `--effort auto` is rejected at spawn; in-session reset is `/effort auto`
+/** "claude-opus-4-8[1m]" -> "opus 4.8 [1m]", "claude-haiku-4-5-20251001" -> "haiku 4.5" */
+const modelLabel = (id: string) => id.replace(/^claude-/, "").replace(/-(\d+)(?:-(\d+))?(?:-\d{8})?(\[1m\])?$/, (_, a, b, m) => ` ${a}${b ? "." + b : ""}${m ? " " + m : ""}`);
+const planLabel = (a: any) => {
+  const t: string = a?.organizationType ?? "", rl: string = a?.organizationRateLimitTier ?? "", seat: string = a?.seatTier ?? "";
+  if (t === "claude_max") return rl.includes("20x") ? "Max 20x" : rl.includes("5x") ? "Max 5x" : "Max";
+  if (t === "claude_team") return seat.includes("premium") ? "Team Premium" : seat.includes("standard") ? "Team Standard" : "Team";
+  if (t === "claude_pro" || t === "claude_individual") return "Pro";
+  if (t === "claude_enterprise") return "Enterprise";
+  return t;
+};
+const fmtDur = (epochSec: number) => {
+  const d = epochSec - Date.now() / 1000;
+  if (d <= 0) return "due";
+  const days = Math.floor(d / 86400), h = Math.floor((d % 86400) / 3600), m = Math.floor((d % 3600) / 60);
+  return days > 0 ? `${days}d ${h}h` : `${h}h ${m}m`;
+};
+const tilde = (p: string) => { const h = "/home/" + (p.split("/")[2] ?? ""); return p === h ? "~" : p.startsWith(h + "/") ? "~" + p.slice(h.length) : p; };
+type Status = { model: string; cwd: string; ctx?: number; sess?: number; reset?: string; plan: string; exited?: boolean };
 const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
 type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; open: boolean };
@@ -104,7 +122,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const turn = useRef({ start: 0, tools: 0, done: "" });
   const [cwd, setCwd] = useState(cwdProp ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
-  const [statusHtml, setStatusHtml] = useState("");
+  const [status, setStatus] = useState<Status | null>(null);
+  const account = useRef<any>(null);
   const [ask, setAsk] = useState<{ x: number; y: number; text: string; ax: number; ay: number } | null>(null);
   const [slash, setSlash] = useState<string[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
@@ -132,28 +151,20 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       return last?.role === "assistant" ? [...m.slice(0, -1), { role: "assistant", text }] : [...m, { role: "assistant", text }];
     });
 
-  const refreshStatus = async () => {
+  const refreshStatus = () => {
     if (compact) return;
     const i = info.current;
     const u = i.usage ?? {};
     const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
     const w = i.rate?.unifiedWindows ?? {};
-    const payload = {
-      hook_event_name: "Status",
-      session_id: sessionId.current,
-      cwd: i.cwd,
-      model: { id: i.model, display_name: i.model.replace(/^claude-/, "").replace(/-\d.*$/, "") },
-      workspace: { current_dir: i.cwd, project_dir: i.cwd },
-      cost: { total_cost_usd: i.cost },
-      context_window: { context_window_size: i.ctx, used_percentage: (used / i.ctx) * 100 },
-      rate_limits: {
-        five_hour: w.five_hour && { used_percentage: w.five_hour.utilization * 100, resets_at: w.five_hour.resetsAt },
-        seven_day: w.seven_day && { used_percentage: w.seven_day.utilization * 100, resets_at: w.seven_day.resetsAt },
-      },
-    };
-    setStatusHtml(ansiToHtml(await invoke<string>("run_statusline", { json: JSON.stringify(payload) })));
+    const team = account.current?.organizationType === "claude_team"; // team: weekly limit matters; others: 5h window
+    const reset = team && w.seven_day?.resetsAt ? `wk reset in ${fmtDur(w.seven_day.resetsAt)}` : w.five_hour?.resetsAt ? `5h reset in ${fmtDur(w.five_hour.resetsAt)}` : undefined;
+    setStatus({ model: i.model, cwd: i.cwd, ctx: i.usage && (used / i.ctx) * 100, sess: w.five_hour && w.five_hour.utilization * 100, reset, plan: planLabel(account.current) });
   };
 
+  useEffect(() => {
+    if (!compact) invoke<any>("account_info").then((a) => { account.current = a; refreshStatus(); });
+  }, []);
   useEffect(() => {
     if (!cwd) invoke<string>("initial_cwd").then(setCwd);
   }, []);
@@ -269,7 +280,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         case "exit":
           setBusy(false);
           setActivity("");
-          setStatusHtml("exited");
+          setStatus((st) => ({ ...(st ?? { model: "", cwd, plan: "" }), exited: true }));
           break;
       }
     });
@@ -318,7 +329,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const applySetting = (key: "model" | "effort", v: string) => {
     (key === "model" ? setModel : setEffort)(v);
     localStorage.setItem(`x-term.${key}`, v);
-    if (started) invoke("send_message", { id, text: `/${key} ${v || "default"}`, images: [] }).catch(() => {});
+    if (started) invoke("send_message", { id, text: `/${key} ${v || (key === "model" ? "default" : "auto")}`, images: [] }).catch(() => {});
     else setGen((g) => g + 1);
   };
 
@@ -516,7 +527,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {!compact && (
           <>
             <div className="status">
-              <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />{busy ? " ⏳" : ""}
+              {!status ? "starting…" : status.exited ? "exited" : <>
+                <span className="s-ctx">CTX {status.ctx == null ? "--" : status.ctx.toFixed(0) + "%"}</span>
+                <span className="s-sess">SESSION {status.sess == null ? "--" : status.sess.toFixed(0) + "%"}</span>
+                <span className="s-model">{modelLabel(status.model).toUpperCase() || "--"}</span>
+                <span className="s-effort">{(effort || "auto").toUpperCase()}</span>
+                <br />
+                <span className="s-path">▸ {tilde(status.cwd)}</span>
+                {status.reset && <span className="s-reset">{status.reset}</span>}
+                {status.plan && <span className="s-plan">{status.plan}</span>}
+              </>}
             </div>
             <div className="cwdrow">
               <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
@@ -524,7 +544,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
                 {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
               <select className="mode" value={model} title="Model" onChange={(e) => applySetting("model", e.target.value)}>
-                {MODELS.map((m) => <option key={m} value={m}>{m || "model: default"}</option>)}
+                {MODELS.map((m) => <option key={m} value={m}>{modelLabel(m) || "model: default"}</option>)}
               </select>
               <select className="mode" value={effort} title="Effort" onChange={(e) => applySetting("effort", e.target.value)}>
                 {EFFORTS.map((m) => <option key={m} value={m}>{m || "effort: default"}</option>)}
