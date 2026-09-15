@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2",
     "dockview": "^8.3.1",
     "dockview-react": "^8.3.1",

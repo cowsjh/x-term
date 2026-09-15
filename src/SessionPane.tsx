@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
 import { IDockviewPanelProps } from "dockview-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -149,10 +148,6 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     localStorage.setItem(LAST_CWD, dir);
     if (!started) setGen((g) => g + 1); // restart process in new dir; after first message cwd is fixed
   };
-  const pickDir = async () => {
-    const d = await open({ directory: true, defaultPath: cwd || undefined });
-    if (typeof d === "string") applyCwd(d);
-  };
 
   const send = async () => {
     const text = input.trim();
@@ -200,10 +195,6 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
 
   return (
     <div className="pane">
-      <div className="cwdbar">
-        <input value={cwd} disabled={started} onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
-        <button disabled={started} onClick={pickDir} title="Choose folder">📁</button>
-      </div>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp}>
         {msgs.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
@@ -230,6 +221,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
         <div className="status">
           <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />{busy ? " ⏳" : ""}
         </div>
+        <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
       </div>
     </div>
   );
