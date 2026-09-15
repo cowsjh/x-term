@@ -21,3 +21,13 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .slash li.sel, .slash li:hover { background: #3b6ea5; }
 .cwd { background: #111; color: #aaa; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font: 12px ui-monospace, monospace; }
 .cwd:disabled { opacity: .5; }
+.msgs { position: relative; }
+.thread { position: absolute; width: 420px; max-width: calc(100% - 16px); z-index: 5; background: #1b1f2e; border: 1px solid #4a5a8a; border-radius: 6px; box-shadow: 0 4px 16px #0008; }
+.thread.collapsed { width: auto; }
+.thread-hdr { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; color: #aac; cursor: pointer; user-select: none; white-space: nowrap; }
+.thread-hdr button { background: none; border: none; color: #888; cursor: pointer; }
+.thread-hdr button:hover { color: #fff; }
+.thread-body { height: 340px; border-top: 1px solid #334; }
+.pane.compact .msgs { padding: 4px 8px; font-size: 13px; }
+.pane.compact .composer { padding: 4px; }
+.pane.compact textarea { min-height: 40px; }

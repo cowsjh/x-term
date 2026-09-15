@@ -6,33 +6,42 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { openSession } from "./App";
 import { ansiToHtml } from "./ansi";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
 type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
+type SessionInfo = { id: string; mtime: number; summary: string };
+// Inline follow-up thread anchored at the selection coordinates inside .msgs
+type Thread = { id: string; x: number; y: number; quote: string; resume?: string; open: boolean };
 
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
-// ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
-type SessionInfo = { id: string; mtime: number; summary: string };
+// ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
+const THREAD_W = 420;
 
-export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
-  const id = api.id;
+export function SessionPane({ api, params }: IDockviewPanelProps<SessionParams>) {
+  return <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} />;
+}
+
+type ChatProps = { id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean };
+
+/** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
+function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: ChatProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [input, setInput] = useState(params.quote ? `> ${params.quote.replace(/\n/g, "\n> ")}\n\n` : "");
+  const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
   const [busy, setBusy] = useState(false);
-  const [cwd, setCwd] = useState(params.cwd ?? "");
+  const [cwd, setCwd] = useState(cwdProp ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
   const [statusHtml, setStatusHtml] = useState("");
-  const [ask, setAsk] = useState<{ x: number; y: number; text: string } | null>(null);
+  const [ask, setAsk] = useState<{ x: number; y: number; text: string; ax: number; ay: number } | null>(null);
   const [slash, setSlash] = useState<string[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
-  const sessionId = useRef<string | undefined>(params.resume);
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const sessionId = useRef<string | undefined>(resumeProp);
   const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number }>({ model: "", cwd: "", commands: [], cost: 0 });
   const streaming = useRef("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -45,6 +54,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     });
 
   const refreshStatus = async () => {
+    if (compact) return;
     const i = info.current;
     const u = i.usage ?? {};
     const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
@@ -146,7 +156,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
           break;
       }
     });
-    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!params.fork, permissionMode: "acceptEdits" })
+    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: "acceptEdits" })
       .catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
     return () => { alive = false; unlisten.then((f) => f()); invoke("stop_session", { id }); };
   }, [id, gen]);
@@ -207,18 +217,29 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     }
   };
 
+  // Selection inside .msgs -> "Ask about this" button; remembers where (in .msgs content coords) to anchor the thread
   const onMouseUp = (e: React.MouseEvent) => {
-    const sel = window.getSelection()?.toString().trim();
-    setAsk(sel ? { x: e.clientX, y: e.clientY - 30, text: sel } : null);
+    if (compact) return;
+    const sel = window.getSelection();
+    const text = sel?.toString().trim();
+    const list = listRef.current;
+    if (!text || !sel || !list || !list.contains(sel.anchorNode)) { setAsk(null); return; }
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    const lr = list.getBoundingClientRect();
+    setAsk({ x: e.clientX, y: e.clientY - 30, text, ax: r.right - lr.left + list.scrollLeft, ay: r.bottom - lr.top + list.scrollTop + 4 });
   };
-  const followUp = () => {
+  const openThread = () => {
     if (!ask) return;
-    openSession(containerApi, { resume: sessionId.current, fork: true, quote: ask.text, title: `↳ ${api.title}`, cwd }, id);
+    const maxX = Math.max(0, (listRef.current?.clientWidth ?? THREAD_W) - THREAD_W - 8);
+    setThreads((t) => [...t, { id: crypto.randomUUID(), x: Math.min(ask.ax, maxX), y: ask.ay, quote: ask.text, resume: sessionId.current, open: true }]);
     setAsk(null);
+    window.getSelection()?.removeAllRanges();
   };
+  const patchThread = (tid: string, p: Partial<Thread> | null) =>
+    setThreads((t) => (p ? t.map((x) => (x.id === tid ? { ...x, ...p } : x)) : t.filter((x) => x.id !== tid)));
 
   return (
-    <div className="pane">
+    <div className={`pane ${compact ? "compact" : ""}`}>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp}>
         {msgs.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
@@ -226,7 +247,16 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
             {m.role === "assistant" || m.role === "user" ? <Markdown {...plugins}>{m.text}</Markdown> : m.text}
           </div>
         ))}
-        {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={followUp}>Ask about this ↗</button>}
+        {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={openThread}>Ask about this ↗</button>}
+        {threads.map((t) => (
+          <div key={t.id} className={`thread ${t.open ? "" : "collapsed"}`} style={{ left: t.x, top: t.y }}>
+            <div className="thread-hdr" onClick={() => patchThread(t.id, { open: !t.open })} title={t.quote}>
+              <span>{t.open ? "▾" : "▸"} 💬 {t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
+              <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }} title="Close thread">✕</button>
+            </div>
+            {t.open && <div className="thread-body"><Chat id={t.id} cwd={cwd} resume={t.resume} fork quote={t.quote} compact /></div>}
+          </div>
+        ))}
       </div>
       <div className="composer">
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
@@ -244,15 +274,20 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
         )}
         <textarea
           value={input}
-          placeholder={busy ? "working…" : "Message (Enter send, Shift+Enter newline, / commands, paste images)"}
+          placeholder={busy ? "working…" : compact ? "Follow-up (Enter to send)" : "Message (Enter send, Shift+Enter newline, / commands, paste images)"}
           onChange={(e) => onInput(e.target.value)}
           onPaste={onPaste}
           onKeyDown={onKey}
         />
-        <div className="status">
-          <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />{busy ? " ⏳" : ""}
-        </div>
-        <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
+        {!compact && (
+          <>
+            <div className="status">
+              <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />{busy ? " ⏳" : ""}
+            </div>
+            <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
+          </>
+        )}
+        {compact && busy && <div className="status">⏳</div>}
       </div>
     </div>
   );
