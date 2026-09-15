@@ -127,9 +127,12 @@ fn run_statusline(json: String) -> String {
     child.wait_with_output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
+/// Directory new panes start in: first CLI arg if given, else the directory x-term was launched from.
 #[tauri::command]
-fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_default()
+fn initial_cwd() -> String {
+    std::env::args().nth(1).filter(|a| std::path::Path::new(a).is_dir())
+        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -145,7 +148,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, run_statusline, home_dir])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, run_statusline, initial_cwd])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -14,7 +14,6 @@ type Img = { media_type: string; data: string };
 type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
 
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
-const LAST_CWD = "x-term.lastCwd";
 // ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
 
@@ -24,7 +23,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   const [input, setInput] = useState(params.quote ? `> ${params.quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
   const [busy, setBusy] = useState(false);
-  const [cwd, setCwd] = useState(params.cwd ?? localStorage.getItem(LAST_CWD) ?? "");
+  const [cwd, setCwd] = useState(params.cwd ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
   const [statusHtml, setStatusHtml] = useState("");
   const [ask, setAsk] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -64,7 +63,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   };
 
   useEffect(() => {
-    if (!cwd) invoke<string>("home_dir").then(setCwd);
+    if (!cwd) invoke<string>("initial_cwd").then(setCwd);
   }, []);
 
   useEffect(() => {
@@ -145,7 +144,6 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   const applyCwd = (dir: string) => {
     if (!dir || dir === cwd) return;
     setCwd(dir);
-    localStorage.setItem(LAST_CWD, dir);
     if (!started) setGen((g) => g + 1); // restart process in new dir; after first message cwd is fixed
   };
 
