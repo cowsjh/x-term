@@ -226,6 +226,15 @@ fn list_skills(cwd: String) -> Vec<String> {
     out
 }
 
+/// Abort the running turn (CLI answers with control_response, then a result with subtype error_during_execution).
+#[tauri::command]
+fn interrupt_session(state: State<Sessions>, id: String) -> Result<(), String> {
+    let mut map = state.0.lock().unwrap();
+    let s = map.get_mut(&id).ok_or("no such session")?;
+    writeln!(s.stdin, r#"{{"type":"control_request","request_id":"{}","request":{{"subtype":"interrupt"}}}}"#, id).map_err(|e| e.to_string())?;
+    s.stdin.flush().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn stop_session(state: State<Sessions>, id: String) {
     if let Some(mut s) = state.0.lock().unwrap().remove(&id) {
@@ -239,7 +248,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, interrupt_session, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

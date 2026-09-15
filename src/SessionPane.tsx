@@ -13,8 +13,8 @@ export type SessionParams = { title?: string; resume?: string; fork?: boolean; q
 type Img = { media_type: string; data: string };
 type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
 type SessionInfo = { id: string; mtime: number; summary: string };
-// Follow-up thread window, fixed at viewport coords of the selection (portal, so nothing clips it)
-type Thread = { id: string; x: number; y: number; quote: string; resume?: string; open: boolean };
+// Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
+type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; open: boolean };
 
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
@@ -22,6 +22,7 @@ const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only af
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
 const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
+const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 
 export function SessionPane({ api, params }: IDockviewPanelProps<SessionParams>) {
   return <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} />;
@@ -43,6 +44,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   const [slashIdx, setSlashIdx] = useState(0);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
   const sessionId = useRef<string | undefined>(resumeProp);
   const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number }>({ model: "", cwd: "", commands: [], cost: 0 });
   const streaming = useRef("");
@@ -164,6 +166,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   }, [id, gen]);
 
   useEffect(() => { listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { if (compact) { const ta = taRef.current; if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } } }, []);
 
   const applyCwd = (dir: string) => {
     if (!dir || dir === cwd) return;
@@ -207,6 +211,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
       if (e.key === "Escape") { setSlash([]); return; }
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === "Escape" && busy) invoke("interrupt_session", { id }).catch(() => {});
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
@@ -227,22 +232,34 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     const list = listRef.current;
     if (!text || !sel || !list || !list.contains(sel.anchorNode)) { setAsk(null); return; }
     const r = sel.getRangeAt(0).getBoundingClientRect();
-    setAsk({ x: e.clientX, y: e.clientY - 30, text, ax: r.right, ay: r.bottom + 4 });
+    const lr = list.getBoundingClientRect();
+    setAsk({ x: e.clientX, y: e.clientY - 30, text, ax: r.right - lr.left + list.scrollLeft, ay: r.bottom - lr.top + list.scrollTop + 4 });
   };
   const openThread = () => {
     if (!ask) return;
-    const maxX = Math.max(0, window.innerWidth - THREAD_W - 8);
-    const maxY = Math.max(0, window.innerHeight - THREAD_H - 8);
-    setThreads((t) => [...t, { id: crypto.randomUUID(), x: Math.min(ask.ax, maxX), y: Math.min(ask.ay, maxY), quote: ask.text, resume: sessionId.current, open: true }]);
+    setThreads((t) => [...t, { id: crypto.randomUUID(), ax: ask.ax, ay: ask.ay, quote: ask.text, resume: sessionId.current, open: true }].sort((a, b) => a.ay - b.ay));
     setAsk(null);
     window.getSelection()?.removeAllRanges();
   };
   const patchThread = (tid: string, p: Partial<Thread> | null) =>
     setThreads((t) => (p ? t.map((x) => (x.id === tid ? { ...x, ...p } : x)) : t.filter((x) => x.id !== tid)));
 
+  // Viewport position per thread: follows its anchor while scrolling; once the anchor passes the top, pins there and stacks under earlier pinned ones
+  const lr = listRef.current?.getBoundingClientRect();
+  let pinned = 0;
+  const placed = threads.map((t) => {
+    const top = lr?.top ?? 0, left = lr?.left ?? 0;
+    let y = top + t.ay - scrollTop;
+    const minY = top + 8 + pinned * THREAD_HDR;
+    if (y < minY) { y = minY; pinned++; }
+    y = Math.min(y, window.innerHeight - THREAD_H - 8);
+    const x = Math.min(left + t.ax, window.innerWidth - THREAD_W - 8);
+    return { t, x, y };
+  });
+
   return (
     <div className={`pane ${compact ? "compact" : ""}`}>
-      <div className="msgs" ref={listRef} onMouseUp={onMouseUp}>
+      <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
         {msgs.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
             {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} />)}
@@ -251,8 +268,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
         ))}
         {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={openThread}>Ask about this ↗</button>}
       </div>
-      {threads.map((t) => createPortal(
-        <div key={t.id} className={`thread ${t.open ? "" : "collapsed"}`} style={{ left: t.x, top: t.y }}>
+      {placed.map(({ t, x, y }) => createPortal(
+        <div key={t.id} className={`thread ${t.open ? "" : "collapsed"}`} style={{ left: x, top: y }}>
           <div className="thread-hdr" onClick={() => patchThread(t.id, { open: !t.open })} title={t.quote}>
             <span>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
             <span>
@@ -279,8 +296,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           </ul>
         )}
         <textarea
+          ref={taRef}
           value={input}
-          placeholder={busy ? "working…" : compact ? "Follow-up (Enter to send)" : "Message (Enter send, Shift+Enter newline, / commands, paste images)"}
+          placeholder={busy ? "working… (Esc to interrupt)" : compact ? "Follow-up (Enter to send)" : "Message (Enter send, Shift+Enter newline, / commands, paste images)"}
           onChange={(e) => onInput(e.target.value)}
           onPaste={onPaste}
           onKeyDown={onKey}
