@@ -167,7 +167,13 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
 
   useEffect(() => { listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
   const taRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { if (compact) { const ta = taRef.current; if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } } }, []);
+  useEffect(() => {
+    if (!compact) return;
+    const focus = () => { const ta = taRef.current; if (ta && document.activeElement !== ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } };
+    focus();
+    const t = setTimeout(focus, 50); // dockview re-focuses the panel on pointerup; win the race
+    return () => clearTimeout(t);
+  }, []);
 
   const applyCwd = (dir: string) => {
     if (!dir || dir === cwd) return;
@@ -244,18 +250,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   const patchThread = (tid: string, p: Partial<Thread> | null) =>
     setThreads((t) => (p ? t.map((x) => (x.id === tid ? { ...x, ...p } : x)) : t.filter((x) => x.id !== tid)));
 
-  // Viewport position per thread: follows its anchor while scrolling; once the anchor passes the top, pins there and stacks under earlier pinned ones
+  // Viewport position per thread: follows its anchor while scrolling. Anchor above the list -> pinned at the top, stacked
+  // downward; anchor below -> pinned at the bottom, stacked upward (header only). Threads are kept sorted by anchor.
   const lr = listRef.current?.getBoundingClientRect();
-  let pinned = 0;
-  const placed = threads.map((t) => {
-    const top = lr?.top ?? 0, left = lr?.left ?? 0;
-    let y = top + t.ay - scrollTop;
-    const minY = top + 8 + pinned * THREAD_HDR;
-    if (y < minY) { y = minY; pinned++; }
-    y = Math.min(y, window.innerHeight - THREAD_H - 8);
-    const x = Math.min(left + t.ax, window.innerWidth - THREAD_W - 8);
-    return { t, x, y };
-  });
+  const top = lr?.top ?? 0, left = lr?.left ?? 0, bottom = lr?.bottom ?? window.innerHeight;
+  const placed = threads.map((t) => ({ t, x: Math.min(left + t.ax, window.innerWidth - THREAD_W - 8), y: top + t.ay - scrollTop, showBody: t.open }));
+  let k = 0;
+  for (const p of placed) { const minY = top + 8 + k * THREAD_HDR; if (p.y < minY) { p.y = minY; k++; } }
+  k = 0;
+  for (const p of [...placed].reverse()) { const maxY = bottom - 8 - (k + 1) * THREAD_HDR; if (p.y > maxY) { p.y = maxY; p.showBody = false; k++; } }
+  for (const p of placed) if (p.showBody) p.y = Math.min(p.y, window.innerHeight - THREAD_H - 8);
 
   return (
     <div className={`pane ${compact ? "compact" : ""}`}>
@@ -266,10 +270,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
             {m.role === "assistant" || m.role === "user" ? <Markdown {...plugins}>{m.text}</Markdown> : m.text}
           </div>
         ))}
-        {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={openThread}>Ask about this ↗</button>}
+        {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>}
       </div>
-      {placed.map(({ t, x, y }) => createPortal(
-        <div key={t.id} className={`thread ${t.open ? "" : "collapsed"}`} style={{ left: x, top: y }}>
+      {placed.map(({ t, x, y, showBody }) => createPortal(
+        <div key={t.id} className={`thread ${showBody ? "" : "collapsed"}`} style={{ left: x, top: y }}>
           <div className="thread-hdr" onClick={() => patchThread(t.id, { open: !t.open })} title={t.quote}>
             <span>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
             <span>
@@ -277,7 +281,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
               <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }}>close</button>
             </span>
           </div>
-          {t.open && <div className="thread-body"><Chat id={t.id} cwd={cwd} resume={t.resume} fork quote={t.quote} compact /></div>}
+          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}><Chat id={t.id} cwd={cwd} resume={t.resume} fork quote={t.quote} compact /></div>
         </div>,
         document.body,
       ))}
