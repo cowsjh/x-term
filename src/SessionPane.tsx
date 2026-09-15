@@ -82,6 +82,11 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
             refreshStatus();
           }
           break;
+        case "conversation_reset": // `/clear`: CLI starts a fresh session in the same process
+          setMsgs([]);
+          info.current.cost = 0;
+          info.current.usage = undefined;
+          break;
         case "rate_limit_event":
           info.current.rate = ev.rate_limit_info;
           break;
