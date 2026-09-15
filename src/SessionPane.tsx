@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { IDockviewPanelProps } from "dockview-react";
@@ -12,7 +13,7 @@ export type SessionParams = { title?: string; resume?: string; fork?: boolean; q
 type Img = { media_type: string; data: string };
 type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
 type SessionInfo = { id: string; mtime: number; summary: string };
-// Inline follow-up thread anchored at the selection coordinates inside .msgs
+// Follow-up thread window, fixed at viewport coords of the selection (portal, so nothing clips it)
 type Thread = { id: string; x: number; y: number; quote: string; resume?: string; open: boolean };
 
 const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
@@ -225,12 +226,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     const list = listRef.current;
     if (!text || !sel || !list || !list.contains(sel.anchorNode)) { setAsk(null); return; }
     const r = sel.getRangeAt(0).getBoundingClientRect();
-    const lr = list.getBoundingClientRect();
-    setAsk({ x: e.clientX, y: e.clientY - 30, text, ax: r.right - lr.left + list.scrollLeft, ay: r.bottom - lr.top + list.scrollTop + 4 });
+    setAsk({ x: e.clientX, y: e.clientY - 30, text, ax: r.right, ay: r.bottom + 4 });
   };
   const openThread = () => {
     if (!ask) return;
-    const maxX = Math.max(0, (listRef.current?.clientWidth ?? THREAD_W) - THREAD_W - 8);
+    const maxX = Math.max(0, window.innerWidth - THREAD_W - 8);
     setThreads((t) => [...t, { id: crypto.randomUUID(), x: Math.min(ask.ax, maxX), y: ask.ay, quote: ask.text, resume: sessionId.current, open: true }]);
     setAsk(null);
     window.getSelection()?.removeAllRanges();
@@ -248,16 +248,20 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           </div>
         ))}
         {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={openThread}>Ask about this ↗</button>}
-        {threads.map((t) => (
-          <div key={t.id} className={`thread ${t.open ? "" : "collapsed"}`} style={{ left: t.x, top: t.y }}>
-            <div className="thread-hdr" onClick={() => patchThread(t.id, { open: !t.open })} title={t.quote}>
-              <span>{t.open ? "▾" : "▸"} 💬 {t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
-              <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }} title="Close thread">✕</button>
-            </div>
-            {t.open && <div className="thread-body"><Chat id={t.id} cwd={cwd} resume={t.resume} fork quote={t.quote} compact /></div>}
-          </div>
-        ))}
       </div>
+      {threads.map((t) => createPortal(
+        <div key={t.id} className={`thread ${t.open ? "" : "collapsed"}`} style={{ left: t.x, top: t.y }}>
+          <div className="thread-hdr" onClick={() => patchThread(t.id, { open: !t.open })} title={t.quote}>
+            <span>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
+            <span>
+              <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, { open: !t.open }); }}>{t.open ? "hide" : "show"}</button>
+              <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }}>close</button>
+            </span>
+          </div>
+          {t.open && <div className="thread-body"><Chat id={t.id} cwd={cwd} resume={t.resume} fork quote={t.quote} compact /></div>}
+        </div>,
+        document.body,
+      ))}
       <div className="composer">
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
         {sessions && (
