@@ -70,6 +70,7 @@ const fmtSec = (ms: number) => `${Math.max(0, Math.round(ms / 1000))}s`;
 const toolSummary = (input: any) => (typeof input?.command === "string" ? input.command : input?.file_path ?? input?.pattern ?? input?.description ?? "");
 const PASTE_LINES = 6;
 const PASTE_CHARS = 600;
+const FORKS = "x-term.forks"; // session ids spawned by thread windows (--fork-session); hidden from the /resume picker
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
 // Context window comes from result.modelUsage[*].contextWindow after the first turn; 200k until then.
 const DEFAULT_CTX = 200_000;
@@ -204,12 +205,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             onState?.({ cwd: ev.cwd, resume: ev.session_id });
             info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
             localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
+            if (fork) localStorage.setItem(FORKS, JSON.stringify([...new Set([...JSON.parse(localStorage.getItem(FORKS) ?? "[]"), ev.session_id])]));
             refreshStatus();
           }
           break;
         case "conversation_reset": // `/clear`: CLI starts a fresh session in the same process
           setMsgs([]);
-          setThreads([]);
           info.current.cost = 0;
           info.current.usage = undefined;
           break;
@@ -347,7 +348,6 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
     setMsgs(toMsgs(hist));
     onState?.({ resume: sess.id, title: sess.summary.slice(0, 30) });
-    setThreads([]); // threads belong to the previous conversation
     info.current.cost = 0;
     setGen((g) => g + 1); // restart process with --resume
   };
@@ -357,7 +357,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     if (!text && !images.length) return;
     if (/^\/resume\b/.test(text)) { // CLI's /resume is an interactive picker; unavailable in -p mode
       setInput(""); setSlash([]);
-      setSessions(await invoke<SessionInfo[]>("list_sessions", { cwd }));
+      const forks = new Set<string>(JSON.parse(localStorage.getItem(FORKS) ?? "[]"));
+      setSessions((await invoke<SessionInfo[]>("list_sessions", { cwd })).filter((s) => !forks.has(s.id)));
       return;
     }
     if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
