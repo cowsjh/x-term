@@ -19,8 +19,8 @@ const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "do
 const MODE_KEY = "x-term.permissionMode";
 // "" = CLI default. Before the first message these restart the process with --model/--effort; after, they are sent as /model and /effort.
 // Full ids: the CLI rejects short forms like `opus-4-8[1m]`; `[1m]` = 1M context variant.
-const MODELS = ["", "claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5", "claude-opus-5[1m]", "claude-opus-4-8", "claude-opus-4-8[1m]", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-5[1m]", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
-const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"]; // `--effort auto` is rejected at spawn; in-session reset is `/effort auto`
+const MODELS = ["claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5", "claude-opus-5[1m]", "claude-opus-4-8", "claude-opus-4-8[1m]", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-5[1m]", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 /** "claude-opus-4-8[1m]" -> "opus 4.8 [1m]", "claude-haiku-4-5-20251001" -> "haiku 4.5" */
 const modelLabel = (id: string) => id.replace(/^claude-/, "").replace(/-(\d+)(?:-(\d+))?(?:-\d{8})?(\[1m\])?$/, (_, a, b, m) => ` ${a}${b ? "." + b : ""}${m ? " " + m : ""}`);
 const planLabel = (a: any) => {
@@ -37,7 +37,9 @@ const fmtDur = (epochSec: number) => {
   const days = Math.floor(d / 86400), h = Math.floor((d % 86400) / 3600), m = Math.floor((d % 3600) / 60);
   return days > 0 ? `${days}d ${h}h` : `${h}h ${m}m`;
 };
-const tilde = (p: string) => { const h = "/home/" + (p.split("/")[2] ?? ""); return p === h ? "~" : p.startsWith(h + "/") ? "~" + p.slice(h.length) : p; };
+const Meter = ({ label, pct }: { label: string; pct?: number }) => (
+  <span className={`meter ${(pct ?? 0) >= 80 ? "hot" : ""}`}><b>{label}</b><i style={{ "--p": `${Math.min(100, pct ?? 0)}%` } as React.CSSProperties} /><em>{pct == null ? "--" : pct.toFixed(0) + "%"}</em></span>
+);
 type Status = { model: string; cwd: string; ctx?: number; sess?: number; reset?: string; plan: string; exited?: boolean };
 const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
@@ -133,8 +135,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
   const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
-  const [model, setModel] = useState(localStorage.getItem("x-term.model") ?? "");
-  const [effort, setEffort] = useState(localStorage.getItem("x-term.effort") ?? "");
+  const [model, setModel] = useState(localStorage.getItem("x-term.model") || "claude-opus-5[1m]");
+  const [effort, setEffort] = useState(localStorage.getItem("x-term.effort") || "high");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
@@ -158,7 +160,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
     const w = i.rate?.unifiedWindows ?? {};
     const team = account.current?.organizationType === "claude_team"; // team: weekly limit matters; others: 5h window
-    const reset = team && w.seven_day?.resetsAt ? `wk reset in ${fmtDur(w.seven_day.resetsAt)}` : w.five_hour?.resetsAt ? `5h reset in ${fmtDur(w.five_hour.resetsAt)}` : undefined;
+    const reset = team && w.seven_day?.resetsAt ? `wk ${fmtDur(w.seven_day.resetsAt)}` : w.five_hour?.resetsAt ? `reset ${fmtDur(w.five_hour.resetsAt)}` : undefined;
     setStatus({ model: i.model, cwd: i.cwd, ctx: i.usage && (used / i.ctx) * 100, sess: w.five_hour && w.five_hour.utilization * 100, reset, plan: planLabel(account.current) });
   };
 
@@ -329,7 +331,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const applySetting = (key: "model" | "effort", v: string) => {
     (key === "model" ? setModel : setEffort)(v);
     localStorage.setItem(`x-term.${key}`, v);
-    if (started) invoke("send_message", { id, text: `/${key} ${v || (key === "model" ? "default" : "auto")}`, images: [] }).catch(() => {});
+    if (started) invoke("send_message", { id, text: `/${key} ${v}`, images: [] }).catch(() => {});
     else setGen((g) => g + 1);
   };
 
@@ -527,15 +529,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {!compact && (
           <>
             <div className="status">
-              {!status ? "starting…" : status.exited ? "exited" : <>
-                <span className="s-ctx">CTX {status.ctx == null ? "--" : status.ctx.toFixed(0) + "%"}</span>
-                <span className="s-sess">SESSION {status.sess == null ? "--" : status.sess.toFixed(0) + "%"}</span>
-                <span className="s-model">{modelLabel(status.model).toUpperCase() || "--"}</span>
-                <span className="s-effort">{(effort || "auto").toUpperCase()}</span>
-                <br />
-                <span className="s-path">▸ {tilde(status.cwd)}</span>
-                {status.reset && <span className="s-reset">{status.reset}</span>}
-                {status.plan && <span className="s-plan">{status.plan}</span>}
+              {!status ? <span className="badge dim">starting…</span> : status.exited ? <span className="badge dim">exited</span> : <>
+                <Meter label="CTX" pct={status.ctx} />
+                <Meter label="5H" pct={status.sess} />
+                <span className="badge model">{modelLabel(status.model) || "…"}</span>
+                <span className="badge">{effort}</span>
+                {status.reset && <span className="badge dim">{status.reset}</span>}
+                {status.plan && <span className="badge plan">{status.plan}</span>}
+                {busy && <span className="badge dim">{SPIN[tick % SPIN.length]}</span>}
               </>}
             </div>
             <div className="cwdrow">
@@ -544,10 +545,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
                 {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
               <select className="mode" value={model} title="Model" onChange={(e) => applySetting("model", e.target.value)}>
-                {MODELS.map((m) => <option key={m} value={m}>{modelLabel(m) || "model: default"}</option>)}
+                {MODELS.map((m) => <option key={m} value={m}>{modelLabel(m)}</option>)}
               </select>
               <select className="mode" value={effort} title="Effort" onChange={(e) => applySetting("effort", e.target.value)}>
-                {EFFORTS.map((m) => <option key={m} value={m}>{m || "effort: default"}</option>)}
+                {EFFORTS.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </div>
           </>

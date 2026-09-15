@@ -135,6 +135,83 @@ fn account_info() -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+// ---- PTY terminal panes ----------------------------------------------------------------------
+
+struct Pty {
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+#[derive(Default)]
+struct Ptys(Mutex<HashMap<String, Pty>>);
+
+/// Spawn `$SHELL` in a pty. Output streams as `pty-data` {id, data} events (UTF-8 safe across chunk
+/// boundaries); `pty-exit` {id} when the shell exits.
+#[tauri::command]
+fn pty_open(app: AppHandle, state: State<Ptys>, id: String, cwd: Option<String>, cols: u16, rows: u16) -> Result<(), String> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    let pair = native_pty_system()
+        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())?;
+    let mut cmd = CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()));
+    cmd.cwd(cwd.filter(|c| !c.is_empty()).unwrap_or_else(initial_cwd));
+    cmd.env("TERM", "xterm-256color");
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    state.0.lock().unwrap().insert(id.clone(), Pty { master: pair.master, writer, child });
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 16384];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            let n = match reader.read(&mut buf) { Ok(0) | Err(_) => break, Ok(n) => n };
+            pending.extend_from_slice(&buf[..n]);
+            let valid = utf8_flush_len(&pending);
+            if valid > 0 {
+                let data = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                pending.drain(..valid);
+                let _ = app.emit("pty-data", SessionEvent { id: id.clone(), line: data });
+            }
+        }
+        let _ = app.emit("pty-exit", id);
+    });
+    Ok(())
+}
+
+/// Bytes safe to emit now: everything except an incomplete trailing UTF-8 sequence (which waits for the next
+/// chunk). A genuinely invalid byte in the middle flushes everything (lossy) so nothing gets stuck.
+fn utf8_flush_len(pending: &[u8]) -> usize {
+    match std::str::from_utf8(pending) {
+        Ok(_) => pending.len(),
+        Err(e) if e.error_len().is_some() => pending.len(),
+        Err(e) => e.valid_up_to(),
+    }
+}
+
+#[tauri::command]
+fn pty_write(state: State<Ptys>, id: String, data: String) -> Result<(), String> {
+    let mut m = state.0.lock().unwrap();
+    let p = m.get_mut(&id).ok_or("no pty")?;
+    p.writer.write_all(data.as_bytes()).and_then(|_| p.writer.flush()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pty_resize(state: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(), String> {
+    let m = state.0.lock().unwrap();
+    let p = m.get(&id).ok_or("no pty")?;
+    p.master.resize(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pty_close(state: State<Ptys>, id: String) {
+    if let Some(mut p) = state.0.lock().unwrap().remove(&id) {
+        let _ = p.child.kill();
+    }
+}
+
 /// Directory new panes start in: first CLI arg if given, else the directory x-term was launched from.
 #[tauri::command]
 fn initial_cwd() -> String {
@@ -280,7 +357,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, account_info, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
+        .manage(Ptys::default())
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, account_info, pty_open, pty_write, pty_resize, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -290,6 +368,14 @@ mod tests {
     use super::*;
 
     /// Needs a real ~/.claude/projects entry; run with X_TERM_TEST_CWD=<project dir that has skills and sessions>.
+    #[test]
+    fn utf8_flush_keeps_partial_tail() {
+        let s = "가나".as_bytes(); // 3 bytes each
+        assert_eq!(utf8_flush_len(&s[..4]), 3); // "가" + first byte of "나" -> hold the tail
+        assert_eq!(utf8_flush_len(s), 6);
+        assert_eq!(utf8_flush_len(&[0x61, 0xff, 0x62]), 3); // invalid byte -> flush all (lossy)
+    }
+
     #[test]
     fn sessions_and_skills_from_claude_dir() {
         let Ok(cwd) = std::env::var("X_TERM_TEST_CWD") else { return };

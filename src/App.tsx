@@ -1,17 +1,18 @@
 import { useEffect, useRef } from "react";
-import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, IDockviewHeaderActionsProps, themeDark } from "dockview-react";
+import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, themeDark } from "dockview-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { SessionPane, SessionParams } from "./SessionPane";
+import { TermPane, TermParams } from "./TermPane";
 
 let counter = 0;
 const LAYOUT_KEY = "x-term.layout"; // dockview layout incl. per-pane params (cwd, session id, title) -> restored on launch
 
-export function openSession(api: DockviewApi, params: SessionParams, referencePanel?: string, direction: "right" | "below" = "right") {
-  const id = crypto.randomUUID();
-  api.addPanel<SessionParams>({
-    id,
-    component: "session",
-    title: params.title ?? `claude ${++counter}`,
+/** `term` = shell in a pty (default pane), `session` = claude stream-json chat. Alt+[ / Alt+] split into a terminal, Alt+Shift+[ / ] into a chat. */
+export function openPane(api: DockviewApi, component: "term" | "session", params: SessionParams | TermParams, referencePanel?: string, direction: "right" | "below" = "right") {
+  api.addPanel({
+    id: crypto.randomUUID(),
+    component,
+    title: (params as SessionParams).title ?? `${component === "term" ? "sh" : "claude"} ${++counter}`,
     params,
     position: referencePanel ? { referencePanel, direction } : undefined,
   });
@@ -19,15 +20,8 @@ export function openSession(api: DockviewApi, params: SessionParams, referencePa
 
 const components = {
   session: (props: IDockviewPanelProps<SessionParams>) => <SessionPane {...props} />,
+  term: (props: IDockviewPanelProps<TermParams>) => <TermPane {...props} />,
 };
-
-function HeaderActions({ containerApi, activePanel }: IDockviewHeaderActionsProps) {
-  return (
-    <button className="hdr-btn" title="New session" onClick={() => openSession(containerApi, {}, activePanel?.id)}>
-      +
-    </button>
-  );
-}
 
 export default function App() {
   const apiRef = useRef<DockviewApi>(null);
@@ -35,16 +29,20 @@ export default function App() {
     apiRef.current = e.api;
     const saved = localStorage.getItem(LAYOUT_KEY);
     try { if (saved) e.api.fromJSON(JSON.parse(saved)); } catch { localStorage.removeItem(LAYOUT_KEY); }
-    if (!e.api.panels.length) openSession(e.api, {});
+    if (!e.api.panels.length) openPane(e.api, "term", {});
     e.api.onDidLayoutChange(() => localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON())));
   };
   useEffect(() => {
-    // Alt+[ : split vertically (new pane to the right), Alt+] : split horizontally (new pane below), Alt+W : close pane
+    // Alt+[ right / Alt+] below: new terminal; with Shift: new claude chat; Alt+W: close pane.
+    // New panes inherit the active pane's cwd.
     const onKey = (e: KeyboardEvent) => {
       const api = apiRef.current;
       if (!e.altKey || !api) return;
-      if (e.key === "[" || e.key === "]") { e.preventDefault(); openSession(api, {}, api.activePanel?.id, e.key === "[" ? "right" : "below"); }
-      else if (e.key === "w") { e.preventDefault(); api.activePanel?.api.close(); }
+      const active = api.activePanel;
+      if (e.code === "BracketLeft" || e.code === "BracketRight") {
+        e.preventDefault();
+        openPane(api, e.shiftKey ? "session" : "term", { cwd: (active?.params as TermParams | undefined)?.cwd }, active?.id, e.code === "BracketLeft" ? "right" : "below");
+      } else if (e.code === "KeyW") { e.preventDefault(); active?.api.close(); }
     };
     window.addEventListener("keydown", onKey);
     // OS file drop: hand the paths to the pane under the cursor (Chat listens for "x-term-drop")
@@ -60,7 +58,6 @@ export default function App() {
     <DockviewReact
       theme={themeDark}
       components={components}
-      rightHeaderActionsComponent={HeaderActions}
       onReady={onReady}
     />
   );
