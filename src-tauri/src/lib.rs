@@ -238,6 +238,29 @@ fn write_line(state: State<Sessions>, id: String, line: String) -> Result<(), St
     s.stdin.flush().map_err(|e| e.to_string())
 }
 
+/// Relative paths under `cwd` containing `query` (case-insensitive), depth <= 5, skipping build/vcs dirs. For `@file` completion.
+#[tauri::command]
+fn list_files(cwd: String, query: String) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, q: &str, depth: u8, out: &mut Vec<String>) {
+        if depth > 5 || out.len() >= 40 { return; }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if matches!(name.as_str(), ".git" | "node_modules" | "target" | "dist" | ".venv" | "__pycache__") { continue; }
+            let path = e.path();
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+            if rel.to_lowercase().contains(q) { out.push(rel); }
+            if path.is_dir() { walk(&path, root, q, depth + 1, out); }
+        }
+    }
+    let mut out = vec![];
+    let root = std::path::PathBuf::from(&cwd);
+    walk(&root, &root, &query.to_lowercase(), 0, &mut out);
+    out.sort_by_key(|p| p.len());
+    out.truncate(30);
+    out
+}
+
 #[tauri::command]
 fn stop_session(state: State<Sessions>, id: String) {
     if let Some(mut s) = state.0.lock().unwrap().remove(&id) {
@@ -252,7 +275,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, IDockviewHeaderActionsProps, themeDark } from "dockview-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { SessionPane, SessionParams } from "./SessionPane";
 
 let counter = 0;
@@ -38,16 +39,22 @@ export default function App() {
     e.api.onDidLayoutChange(() => localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON())));
   };
   useEffect(() => {
-    // Alt+[ : split vertically (new pane to the right), Alt+] : split horizontally (new pane below)
+    // Alt+[ : split vertically (new pane to the right), Alt+] : split horizontally (new pane below), Alt+W : close pane
     const onKey = (e: KeyboardEvent) => {
-      if (!e.altKey || (e.key !== "[" && e.key !== "]")) return;
       const api = apiRef.current;
-      if (!api) return;
-      e.preventDefault();
-      openSession(api, {}, api.activePanel?.id, e.key === "[" ? "right" : "below");
+      if (!e.altKey || !api) return;
+      if (e.key === "[" || e.key === "]") { e.preventDefault(); openSession(api, {}, api.activePanel?.id, e.key === "[" ? "right" : "below"); }
+      else if (e.key === "w") { e.preventDefault(); api.activePanel?.api.close(); }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // OS file drop: hand the paths to the pane under the cursor (Chat listens for "x-term-drop")
+    const drop = getCurrentWebview().onDragDropEvent((ev) => {
+      if (ev.payload.type !== "drop") return;
+      const { x, y } = ev.payload.position;
+      const s = window.devicePixelRatio || 1;
+      document.elementFromPoint(x / s, y / s)?.closest(".pane")?.dispatchEvent(new CustomEvent("x-term-drop", { detail: ev.payload.paths }));
+    });
+    return () => { window.removeEventListener("keydown", onKey); drop.then((f) => f()); };
   }, []);
   return (
     <DockviewReact

@@ -18,10 +18,21 @@ type SessionInfo = { id: string; mtime: number; summary: string };
 type Perm = { request_id: string; tool_name: string; input: any; description?: string; permission_suggestions?: any[] };
 const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
 const MODE_KEY = "x-term.permissionMode";
+const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
 type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; open: boolean };
 
-const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex] };
+function Pre(props: React.ComponentProps<"pre">) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [ok, setOk] = useState(false);
+  return (
+    <div className="codewrap">
+      <button className="copy" onClick={() => { navigator.clipboard.writeText(ref.current?.innerText ?? ""); setOk(true); setTimeout(() => setOk(false), 1200); }}>{ok ? "copied" : "copy"}</button>
+      <pre ref={ref} {...props} />
+    </div>
+  );
+}
+const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex], components: { pre: Pre } };
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
 // ponytail: context size not reported by CLI; 1M for fable/opus-1m, else 200k. Fix when stream-json exposes it.
 const ctxSize = (model: string) => (/fable|\[1m\]/.test(model) ? 1_000_000 : 200_000);
@@ -76,6 +87,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [ask, setAsk] = useState<{ x: number; y: number; text: string; ax: number; ay: number } | null>(null);
   const [slash, setSlash] = useState<string[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
+  const [files, setFiles] = useState<string[]>([]); // @path completion
+  const histPos = useRef(-1); // -1 = editing new input; otherwise index from the end of history
+  const rootRef = useRef<HTMLDivElement>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
   const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
@@ -123,6 +137,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
 
   useEffect(() => {
     if (resumeProp && !fork && cwd) invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: resumeProp }).then((hist) => { if (hist.length) setMsgs(toMsgs(hist)); });
+  }, []);
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const h = (e: Event) => { const paths = (e as CustomEvent<string[]>).detail; setInput((v) => v + paths.map((p) => `@${p} `).join("")); taRef.current?.focus(); };
+    el.addEventListener("x-term-drop", h);
+    return () => el.removeEventListener("x-term-drop", h);
   }, []);
 
   useEffect(() => {
@@ -279,6 +301,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       return;
     }
     if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
+    if (text) { const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]").filter((x: string) => x !== text); h.push(text); localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-100))); }
+    histPos.current = -1;
     setMsgs((m) => [...m, { role: "user", text, images }]);
     setInput(""); setImages([]); setBusy(true); setSlash([]); setAtBottom(true);
     await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
@@ -288,14 +312,35 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     setInput(v);
     const m = /^\/(\S*)$/.exec(v);
     setSlash(m ? info.current.commands.filter((c) => c.startsWith(m[1])).slice(0, 12) : []);
+    const f = /(?:^|\s)@([^\s@]*)$/.exec(v);
+    if (f) invoke<string[]>("list_files", { cwd, query: f[1] }).then(setFiles); else setFiles([]);
     setSlashIdx(0);
   };
+  const pickFile = (path: string) => { setInput((v) => v.replace(/@[^\s@]*$/, `@${path} `)); setFiles([]); taRef.current?.focus(); };
   const onKey = (e: React.KeyboardEvent) => {
-    if (slash.length) {
-      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx((i) => (i + 1) % slash.length); return; }
-      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx((i) => (i - 1 + slash.length) % slash.length); return; }
-      if (e.key === "Tab" || (e.key === "Enter" && input !== `/${slash[slashIdx]}`)) { e.preventDefault(); setInput(`/${slash[slashIdx]} `); setSlash([]); return; }
-      if (e.key === "Escape") { setSlash([]); return; }
+    const list = slash.length ? slash : files;
+    if (list.length) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx((i) => (i + 1) % list.length); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx((i) => (i - 1 + list.length) % list.length); return; }
+      if (e.key === "Tab" || (e.key === "Enter" && (files.length || input !== `/${slash[slashIdx]}`))) {
+        e.preventDefault();
+        if (slash.length) { setInput(`/${slash[slashIdx]} `); setSlash([]); } else pickFile(files[slashIdx]);
+        return;
+      }
+      if (e.key === "Escape") { setSlash([]); setFiles([]); return; }
+    }
+    // prompt history: ↑/↓ when the caret is on the first/last line
+    const ta = e.currentTarget as HTMLTextAreaElement;
+    if (e.key === "ArrowUp" && !ta.value.slice(0, ta.selectionStart).includes("\n")) {
+      const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]");
+      if (histPos.current + 1 < h.length) { e.preventDefault(); histPos.current++; setInput(h[h.length - 1 - histPos.current]); }
+      return;
+    }
+    if (e.key === "ArrowDown" && !ta.value.slice(ta.selectionStart).includes("\n") && histPos.current >= 0) {
+      const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]");
+      e.preventDefault(); histPos.current--;
+      setInput(histPos.current < 0 ? "" : h[h.length - 1 - histPos.current]);
+      return;
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     if (e.key === "Escape" && busy) control({ subtype: "interrupt" });
@@ -343,7 +388,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   for (const p of placed) if (p.showBody) p.y = Math.min(p.y, window.innerHeight - THREAD_H - 8);
 
   return (
-    <div className={`pane ${compact ? "compact" : ""}`}>
+    <div className={`pane ${compact ? "compact" : ""}`} ref={rootRef}>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll}>
         {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : (
           <div key={i} className={`msg ${m.role}`}>
@@ -390,6 +435,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {slash.length > 0 && (
           <ul className="slash">
             {slash.map((c, i) => <li key={c} className={i === slashIdx ? "sel" : ""} onMouseDown={() => { setInput(`/${c} `); setSlash([]); }}>/{c}</li>)}
+          </ul>
+        )}
+        {files.length > 0 && !slash.length && (
+          <ul className="slash">
+            {files.map((f, i) => <li key={f} className={i === slashIdx ? "sel" : ""} onMouseDown={() => pickFile(f)}>@{f}</li>)}
           </ul>
         )}
         <textarea
