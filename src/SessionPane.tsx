@@ -8,10 +8,11 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { ansiToHtml } from "./ansi";
+import { ToolCard, ToolMsg } from "./ToolCard";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
-type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
+type Msg = { role: "user" | "assistant" | "err"; text: string; images?: Img[] } | ToolMsg;
 type SessionInfo = { id: string; mtime: number; summary: string };
 type Perm = { request_id: string; tool_name: string; input: any; description?: string; permission_suggestions?: any[] };
 const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
@@ -130,7 +131,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           const d = ev.event;
           if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
             streaming.current = "";
-            setMsgs((m) => [...m, { role: "tool", text: `▶ ${d.content_block.name}` }]);
+            const b = d.content_block;
+            setMsgs((m) => [...m, { role: "tool", id: b.id, name: b.name, input: b.input, text: b.name }]);
           } else if (d.type === "content_block_delta" && d.delta?.type === "text_delta") {
             streaming.current += d.delta.text;
             setAssistant(streaming.current);
@@ -143,7 +145,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           if (ev.message?.usage) info.current.usage = ev.message.usage;
           for (const b of ev.message?.content ?? []) {
             if (b.type === "tool_use")
-              setMsgs((m) => [...m.filter((x) => x.text !== `▶ ${b.name}`), { role: "tool", text: `▶ ${b.name} ${JSON.stringify(b.input).slice(0, 300)}` }]);
+              setMsgs((m) => m.some((x) => x.role === "tool" && x.id === b.id)
+                ? m.map((x) => (x.role === "tool" && x.id === b.id ? { ...x, input: b.input } : x))
+                : [...m, { role: "tool", id: b.id, name: b.name, input: b.input, text: b.name }]);
             // slash commands (e.g. /context) come back as a full text block without deltas
             if (b.type === "text" && !streaming.current) setAssistant(b.text);
           }
@@ -152,7 +156,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           for (const b of ev.message?.content ?? []) {
             if (b.type === "tool_result") {
               const t = typeof b.content === "string" ? b.content : (b.content ?? []).map((c: any) => c.text ?? "").join("\n");
-              setMsgs((m) => [...m, { role: "tool", text: `◀ ${t.slice(0, 500)}` }]);
+              setMsgs((m) => m.map((x) => (x.role === "tool" && x.id === b.tool_use_id ? { ...x, result: t, error: !!b.is_error } : x)));
             }
           }
           break;
@@ -214,7 +218,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     setSessions(null);
     sessionId.current = sess.id;
     const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
-    setMsgs(hist.map((h) => ({ role: h.role as Msg["role"], text: h.text })));
+    setMsgs(hist.map((h) => (h.role === "tool" ? { role: "tool", id: crypto.randomUUID(), name: h.text.replace(/^▶ /, ""), input: {}, result: "", text: h.text } : { role: h.role as "user" | "assistant", text: h.text })));
     setThreads([]); // threads belong to the previous conversation
     info.current.cost = 0;
     setGen((g) => g + 1); // restart process with --resume
@@ -294,10 +298,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   return (
     <div className={`pane ${compact ? "compact" : ""}`}>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
-        {msgs.map((m, i) => (
+        {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : (
           <div key={i} className={`msg ${m.role}`}>
             {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} />)}
-            {m.role === "assistant" || m.role === "user" ? <Markdown {...plugins}>{m.text}</Markdown> : m.text}
+            {m.role === "err" ? m.text : <Markdown {...plugins}>{m.text}</Markdown>}
           </div>
         ))}
         {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>}

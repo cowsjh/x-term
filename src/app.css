@@ -4,7 +4,8 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .msg { margin: 6px 0; padding: 6px 10px; border-radius: 6px; white-space: normal; }
 .msg.user { background: #2a3a55; }
 .msg.assistant { background: #262626; }
-.msg.tool { background: #2d2d1e; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+.msg.tool { background: #262a1e; font-family: ui-monospace, monospace; font-size: 12px; cursor: pointer; }
+.msg.tool.error { background: #3a2222; }
 .msg.err { background: #4a2020; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
 .msg pre { background: #111; padding: 8px; overflow-x: auto; border-radius: 4px; }
 .msg code { font-family: ui-monospace, monospace; font-size: 13px; }
@@ -39,3 +40,10 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .perm pre { margin: 0 0 6px; background: #111; padding: 6px; border-radius: 4px; white-space: pre-wrap; max-height: 160px; overflow: auto; font-size: 12px; }
 .perm button { margin-right: 6px; background: #2a3a55; color: #ddd; border: 1px solid #446; border-radius: 4px; padding: 3px 10px; cursor: pointer; }
 .perm button:hover { background: #3b6ea5; }
+.tool-hdr { color: #cbd; }
+.tool-sum { color: #9a9; word-break: break-all; }
+.tool-res, .tool-in { margin: 4px 0 0; padding: 4px 6px; background: #111; border-radius: 4px; white-space: pre-wrap; color: #bbb; max-height: 400px; overflow: auto; }
+.tool-res:not(.full) { color: #888; max-height: 3em; overflow: hidden; }
+.diff pre { margin: 0; padding: 0 6px; white-space: pre-wrap; background: #111; }
+.diff pre.add { background: #163a1e; color: #9f9; }
+.diff pre.del { background: #3a1a1a; color: #f99; }
