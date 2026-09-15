@@ -195,7 +195,9 @@ fn load_transcript(cwd: String, id: String) -> Vec<TranscriptMsg> {
         }
         let content = &v["message"]["content"];
         if let Some(t) = content.as_str() {
-            out.push(TranscriptMsg { role: role.into(), text: t.into() });
+            if !t.starts_with('<') { // skip <command-name>/<local-command-caveat> bookkeeping records
+                out.push(TranscriptMsg { role: role.into(), text: t.into() });
+            }
             continue;
         }
         for b in content.as_array().into_iter().flatten() {
