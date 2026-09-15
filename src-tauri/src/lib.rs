@@ -44,6 +44,9 @@ fn start_session(
         "--output-format",
         "stream-json",
         "--include-partial-messages",
+        "--permission-prompt-tool",
+        "stdio", // permission prompts arrive as control_request can_use_tool; UI answers via write_line
+        "--allow-dangerously-skip-permissions", // lets the mode dropdown switch to bypassPermissions live
     ]);
     if let Some(r) = &resume {
         cmd.args(["--resume", r]);
@@ -226,12 +229,12 @@ fn list_skills(cwd: String) -> Vec<String> {
     out
 }
 
-/// Abort the running turn (CLI answers with control_response, then a result with subtype error_during_execution).
+/// Write one raw JSON line to the session's stdin (control requests/responses built by the frontend).
 #[tauri::command]
-fn interrupt_session(state: State<Sessions>, id: String) -> Result<(), String> {
+fn write_line(state: State<Sessions>, id: String, line: String) -> Result<(), String> {
     let mut map = state.0.lock().unwrap();
     let s = map.get_mut(&id).ok_or("no such session")?;
-    writeln!(s.stdin, r#"{{"type":"control_request","request_id":"{}","request":{{"subtype":"interrupt"}}}}"#, id).map_err(|e| e.to_string())?;
+    writeln!(s.stdin, "{line}").map_err(|e| e.to_string())?;
     s.stdin.flush().map_err(|e| e.to_string())
 }
 
@@ -248,7 +251,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Sessions::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, interrupt_session, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, initial_cwd, list_sessions, load_transcript, list_skills])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

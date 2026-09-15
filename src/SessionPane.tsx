@@ -13,6 +13,9 @@ export type SessionParams = { title?: string; resume?: string; fork?: boolean; q
 type Img = { media_type: string; data: string };
 type Msg = { role: "user" | "assistant" | "tool" | "err"; text: string; images?: Img[] };
 type SessionInfo = { id: string; mtime: number; summary: string };
+type Perm = { request_id: string; tool_name: string; input: any; description?: string; permission_suggestions?: any[] };
+const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
+const MODE_KEY = "x-term.permissionMode";
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
 type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; open: boolean };
 
@@ -43,6 +46,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
   const [slash, setSlash] = useState<string[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
+  const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
+  const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
   const [threads, setThreads] = useState<Thread[]>([]);
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
   const sessionId = useRef<string | undefined>(resumeProp);
@@ -115,6 +120,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
         case "rate_limit_event":
           info.current.rate = ev.rate_limit_info;
           break;
+        case "control_request":
+          if (ev.request?.subtype === "can_use_tool") setPerm({ request_id: ev.request_id, ...ev.request });
+          break;
+        case "control_response":
+          if (ev.response?.subtype === "error") setMsgs((m) => [...m, { role: "err", text: ev.response.error }]);
+          break;
         case "stream_event": {
           const d = ev.event;
           if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
@@ -161,7 +172,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
           break;
       }
     });
-    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: "acceptEdits" })
+    invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: mode })
       .catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
     return () => { alive = false; unlisten.then((f) => f()); invoke("stop_session", { id }); };
   }, [id, gen]);
@@ -175,6 +186,23 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
     const t = setTimeout(focus, 50); // dockview re-focuses the panel on pointerup; win the race
     return () => clearTimeout(t);
   }, []);
+
+  const control = (request: object) =>
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(), request }) }).catch(() => {});
+  const answerPerm = (behavior: "allow" | "deny", always = false) => {
+    if (!perm) return;
+    const response = behavior === "allow"
+      ? { behavior, updatedInput: perm.input, ...(always && perm.permission_suggestions ? { updatedPermissions: perm.permission_suggestions } : {}) }
+      : { behavior, message: "User denied this action" };
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
+    setPerm(null);
+  };
+  const applyMode = (m: string) => {
+    setMode(m);
+    localStorage.setItem(MODE_KEY, m);
+    if (started) control({ subtype: "set_permission_mode", mode: m }); // live switch; before the first message the restart below picks it up
+    else setGen((g) => g + 1);
+  };
 
   const applyCwd = (dir: string) => {
     if (!dir || dir === cwd) return;
@@ -219,7 +247,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
       if (e.key === "Escape") { setSlash([]); return; }
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-    if (e.key === "Escape" && busy) invoke("interrupt_session", { id }).catch(() => {});
+    if (e.key === "Escape" && busy) control({ subtype: "interrupt" });
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
@@ -289,6 +317,17 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
       ))}
       <div className="composer">
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
+        {perm && (
+          <div className="perm">
+            <div className="perm-title">{perm.tool_name} {perm.description ? `· ${perm.description}` : ""}</div>
+            <pre>{typeof perm.input?.command === "string" ? perm.input.command : perm.input?.file_path ?? JSON.stringify(perm.input, null, 1).slice(0, 600)}</pre>
+            <div>
+              <button onClick={() => answerPerm("allow")}>Allow</button>
+              {perm.permission_suggestions?.length ? <button onClick={() => answerPerm("allow", true)}>Always allow</button> : null}
+              <button onClick={() => answerPerm("deny")}>Deny</button>
+            </div>
+          </div>
+        )}
         {sessions && (
           <ul className="slash">
             {sessions.length === 0 && <li>no sessions for {cwd}</li>}
@@ -314,7 +353,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact }: Ch
             <div className="status">
               <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />{busy ? " ⏳" : ""}
             </div>
-            <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
+            <div className="cwdrow">
+              <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
+              <select className="mode" value={mode} title="Permission mode" onChange={(e) => applyMode(e.target.value)}>
+                {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
           </>
         )}
         {compact && busy && <div className="status">⏳</div>}
