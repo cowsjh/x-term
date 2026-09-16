@@ -100,7 +100,7 @@ const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 
-export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void; onTerminal: (cmd: string) => void }) {
+export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerminal }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void; onEnd: () => void; onTerminal: (cmd: string) => void }) {
   const [unread, setUnread] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [find, setFind] = useState<string | null>(null); // Ctrl+F: in-conversation search (WebKit window.find)
@@ -118,11 +118,11 @@ export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }:
     setMenu({ x: e.clientX, y: e.clientY });
   };
   const sel = () => window.getSelection()?.toString() ?? "";
-  // Ctrl+C with nothing selected -> back to the shell (with a selection it stays the copy shortcut)
+  // Ctrl+C with nothing selected -> end the session and return to the shell (Chat handles it first while a turn runs: interrupt)
   const onKey = (e: React.KeyboardEvent) => {
     const t = e.target as HTMLTextAreaElement;
     const has = (t.selectionStart != null && t.selectionStart !== t.selectionEnd) || !!sel();
-    if (e.ctrlKey && !e.shiftKey && e.key === "c" && !has) { e.preventDefault(); onSwitch(); }
+    if (e.ctrlKey && !e.shiftKey && e.key === "c" && !has) { e.preventDefault(); onEnd(); }
     if (e.ctrlKey && e.key === "f") { e.preventDefault(); setFind((f) => f ?? ""); setTimeout(() => (document.querySelector(`#find-${api.id}`) as HTMLInputElement)?.select(), 0); }
   };
   const onFindKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -149,7 +149,7 @@ export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }:
     <div className="pane-wrap" onContextMenu={onCtx} onKeyDown={onKey}>
       {find !== null && <input id={`find-${api.id}`} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
       {toast && <div className="toast">{toast}</div>}
-      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} onMsgs={(m) => { msgsRef.current = m; }} />
+      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} onEnd={onEnd} onMsgs={(m) => { msgsRef.current = m; }} />
       {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Find", key: "f", run: () => setFind((f) => f ?? "") }, { label: "Export markdown", key: "e", run: exportMd }, { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
@@ -167,10 +167,11 @@ type ChatProps = {
   onDone?: (lastText: string) => void; // a turn finished
   onMsgs?: (msgs: Msg[]) => void; // message list changed (threads report up so the parent can merge them)
   onTerminal?: (cmd: string) => void; // run a shell command in the pane's terminal (fallback for interactive-only slash commands)
+  onEnd?: () => void; // Ctrl+C while idle: end this session
 };
 
 /** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
-function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone, onMsgs, onTerminal }: ChatProps) {
+function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone, onMsgs, onTerminal, onEnd }: ChatProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
@@ -584,6 +585,13 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       return;
     }
     if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); cycleMode(); return; }
+    if (e.ctrlKey && !e.shiftKey && e.key === "c" && !compact) { // like the CLI: first Ctrl+C interrupts a running turn, an idle Ctrl+C exits
+      const ta = e.currentTarget as HTMLTextAreaElement;
+      if (ta.selectionStart !== ta.selectionEnd) return; // copy
+      e.preventDefault(); e.stopPropagation();
+      if (busy) { control({ subtype: "interrupt" }); setQueue([]); } else onEnd?.();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     if (e.key === "Escape" && busy) { control({ subtype: "interrupt" }); setQueue([]); }
   };

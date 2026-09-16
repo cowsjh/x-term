@@ -29,11 +29,18 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
   const pending = useRef<string | null>(null);
   const flush = () => { if (pending.current) { invoke("pty_write", { id: api.id, data: pending.current + "\n" }).catch(warn); pending.current = null; } };
   const runInTerm = (cmd: string) => { pending.current = cmd; if (seen.term) { switchTo("term"); flush(); } else switchTo("term"); };
+  /** Ctrl+C in the chat = end the claude session (like the CLI): drop the chat; the next Ctrl+A starts fresh where the shell is. */
+  const endAgent = () => {
+    setSeen((s) => ({ ...s, agent: false }));
+    setMode("term");
+    api.updateParameters({ ...params, mode: "term", resume: undefined, title: undefined, fork: undefined, quote: undefined });
+    localStorage.setItem("x-term.layout", JSON.stringify(containerApi.toJSON()));
+  };
   const onExit = () => { if (seen.agent) { setSeen((s) => ({ ...s, term: false })); switchTo("agent"); } else api.close(); };
   return (
     <div className="pane-root" ref={root}>
       {seen.term && <div className={`slot term ${mode === "term" ? "" : "hidden"}`}><TermPane id={api.id} cwd={params.cwd} onSwitch={() => switchTo("agent")} onExit={onExit} onReady={flush} /></div>}
-      {seen.agent && <div className={`slot agent ${mode === "agent" ? "" : "hidden"}`}><SessionPane {...props} params={{ ...params, cwd: agentCwd }} onSwitch={() => switchTo("term")} onTerminal={runInTerm} /></div>}
+      {seen.agent && <div className={`slot agent ${mode === "agent" ? "" : "hidden"}`}><SessionPane {...props} params={{ ...params, cwd: agentCwd }} onSwitch={() => switchTo("term")} onEnd={endAgent} onTerminal={runInTerm} /></div>}
     </div>
   );
 }
