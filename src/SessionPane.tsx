@@ -9,6 +9,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { ToolCard, ToolMsg, SubStep } from "./ToolCard";
+import { ansiToHtml } from "./ansi";
 import { Menu } from "./Menu";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
@@ -27,24 +28,6 @@ const MODELS = ["claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5", "cl
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 /** "claude-opus-4-8[1m]" -> "opus 4.8 [1m]", "claude-haiku-4-5-20251001" -> "haiku 4.5" */
 const modelLabel = (id: string) => id.replace(/^claude-/, "").replace(/-(\d+)(?:-(\d+))?(?:-\d{8})?(\[1m\])?$/, (_, a, b, m) => ` ${a}${b ? "." + b : ""}${m ? " " + m : ""}`);
-const planLabel = (a: any) => {
-  const t: string = a?.organizationType ?? "", rl: string = a?.organizationRateLimitTier ?? "", seat: string = a?.seatTier ?? "";
-  if (t === "claude_max") return rl.includes("20x") ? "Max 20x" : rl.includes("5x") ? "Max 5x" : "Max";
-  if (t === "claude_team") return seat.includes("premium") ? "Team Premium" : seat.includes("standard") ? "Team Standard" : "Team";
-  if (t === "claude_pro" || t === "claude_individual") return "Pro";
-  if (t === "claude_enterprise") return "Enterprise";
-  return t;
-};
-const fmtDur = (epochSec: number) => {
-  const d = epochSec - Date.now() / 1000;
-  if (d <= 0) return "due";
-  const days = Math.floor(d / 86400), h = Math.floor((d % 86400) / 3600), m = Math.floor((d % 3600) / 60);
-  return days > 0 ? `${days}d ${h}h` : `${h}h ${m}m`;
-};
-const Meter = ({ label, pct }: { label: string; pct?: number }) => (
-  <span className={`meter ${(pct ?? 0) >= 80 ? "hot" : ""}`}><b>{label}</b><i style={{ "--p": `${Math.min(100, pct ?? 0)}%` } as React.CSSProperties} /><em>{pct == null ? "--" : pct.toFixed(0) + "%"}</em></span>
-);
-type Status = { model: string; cwd: string; ctx?: number; sess?: number; reset?: string; plan: string; exited?: boolean };
 const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
 /** `resume` = main session it forked from, `sid` = the thread's own (forked) session once known -> restored with --resume, no re-fork. */
@@ -163,8 +146,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const turn = useRef({ start: 0, tools: 0, done: "" });
   const [cwd, setCwd] = useState(cwdProp ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
-  const [status, setStatus] = useState<Status | null>(null);
-  const account = useRef<any>(null);
+  const [statusHtml, setStatusHtml] = useState("");
   const [ask, setAsk] = useState<{ x: number; y: number; text: string; ax: number; ay: number } | null>(null);
   const [slash, setSlash] = useState<string[]>([]);
   const [slashIdx, setSlashIdx] = useState(0);
@@ -176,6 +158,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
   const [model, setModel] = useState(localStorage.getItem("x-term.model") || "claude-opus-5[1m]");
   const [effort, setEffort] = useState(localStorage.getItem("x-term.effort") || "high");
+  const effortRef = useRef(effort);
+  effortRef.current = effort;
   const [threads, setThreads] = useState<Thread[]>(() => (compact ? [] : loadThreads(resumeProp)));
   const threadKey = useRef(resumeProp); // main session the current threads belong to
   useEffect(() => {
@@ -200,20 +184,29 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       return last?.role === "assistant" ? [...m.slice(0, -1), { role: "assistant", text }] : [...m, { role: "assistant", text }];
     });
 
-  const refreshStatus = () => {
+  /** Feeds the user's own Claude Code statusLine script (~/.claude/settings.json) the same JSON the CLI would. */
+  const refreshStatus = async () => {
     if (compact) return;
     const i = info.current;
     const u = i.usage ?? {};
     const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
     const w = i.rate?.unifiedWindows ?? {};
-    const team = account.current?.organizationType === "claude_team"; // team: weekly limit matters; others: 5h window
-    const reset = team && w.seven_day?.resetsAt ? `wk ${fmtDur(w.seven_day.resetsAt)}` : w.five_hour?.resetsAt ? `reset ${fmtDur(w.five_hour.resetsAt)}` : undefined;
-    setStatus({ model: i.model, cwd: i.cwd, ctx: i.usage && (used / i.ctx) * 100, sess: w.five_hour && w.five_hour.utilization * 100, reset, plan: planLabel(account.current) });
+    const payload = {
+      hook_event_name: "Status",
+      session_id: sessionId.current,
+      cwd: i.cwd,
+      model: { id: i.model, display_name: modelLabel(i.model) },
+      workspace: { current_dir: i.cwd, project_dir: i.cwd },
+      cost: { total_cost_usd: i.cost },
+      context_window: { context_window_size: i.ctx, used_percentage: i.usage ? (used / i.ctx) * 100 : null },
+      effort: { level: effortRef.current },
+      rate_limits: {
+        five_hour: w.five_hour && { used_percentage: w.five_hour.utilization * 100, resets_at: w.five_hour.resetsAt },
+        seven_day: w.seven_day && { used_percentage: w.seven_day.utilization * 100, resets_at: w.seven_day.resetsAt },
+      },
+    };
+    setStatusHtml(ansiToHtml(await invoke<string>("run_statusline", { json: JSON.stringify(payload) })));
   };
-
-  useEffect(() => {
-    if (!compact) invoke<any>("account_info").then((a) => { account.current = a; refreshStatus(); });
-  }, []);
   useEffect(() => {
     if (!cwd) invoke<string>("initial_cwd").then(setCwd);
   }, []);
@@ -374,7 +367,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         case "exit":
           setBusy(false);
           setActivity("");
-          setStatus((st) => ({ ...(st ?? { model: "", cwd, plan: "" }), exited: true }));
+          setStatusHtml("exited");
           break;
       }
     });
@@ -437,6 +430,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     if (!questions.every((q) => picks[q.question]?.length)) return;
     answerPerm("allow", false, { ...perm!.input, answers: Object.fromEntries(questions.map((q) => [q.question, picks[q.question].join(", ")])) });
   };
+  const cycleMode = () => applyMode(MODES[(MODES.indexOf(mode) + 1) % MODES.length]);
   const applyMode = (m: string) => {
     setMode(m);
     localStorage.setItem(MODE_KEY, m);
@@ -444,18 +438,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     else setGen((g) => g + 1);
   };
 
-  const applySetting = (key: "model" | "effort", v: string) => {
-    (key === "model" ? setModel : setEffort)(v);
-    localStorage.setItem(`x-term.${key}`, v);
-    if (started) invoke("send_message", { id, text: `/${key} ${v}`, images: [] }).catch(() => {});
-    else setGen((g) => g + 1);
-  };
 
-  const applyCwd = (dir: string) => {
-    if (!dir || dir === cwd) return;
-    setCwd(dir);
-    if (!started) setGen((g) => g + 1); // restart process in new dir; after first message cwd is fixed
-  };
 
   const resume = async (sess: SessionInfo) => {
     setSessions(null);
@@ -547,6 +530,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       setInput(histPos.current < 0 ? "" : h[h.length - 1 - histPos.current]);
       return;
     }
+    if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); cycleMode(); return; }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     if (e.key === "Escape" && busy) { control({ subtype: "interrupt" }); setQueue([]); }
   };
@@ -712,27 +696,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {!compact && (
           <>
             <div className="status">
-              {!status ? <span className="badge dim">starting…</span> : status.exited ? <span className="badge dim">exited</span> : <>
-                <Meter label="CTX" pct={status.ctx} />
-                <Meter label="5H" pct={status.sess} />
-                <span className="badge model">{modelLabel(status.model) || "…"}</span>
-                <span className="badge">{effort}</span>
-                {status.reset && <span className="badge dim">{status.reset}</span>}
-                {status.plan && <span className="badge plan">{status.plan}</span>}
-                {busy && <span className="badge dim">{SPIN[tick % SPIN.length]}</span>}
-              </>}
-            </div>
-            <div className="cwdrow">
-              <input className="cwd" value={cwd} disabled={started} title="Working directory (locked after first message)" onChange={(e) => setCwd(e.target.value)} onBlur={(e) => applyCwd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && applyCwd(cwd)} />
-              <select className="mode" value={mode} title="Permission mode" onChange={(e) => applyMode(e.target.value)}>
-                {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <select className="mode" value={model} title="Model" onChange={(e) => applySetting("model", e.target.value)}>
-                {MODELS.map((m) => <option key={m} value={m}>{modelLabel(m)}</option>)}
-              </select>
-              <select className="mode" value={effort} title="Effort" onChange={(e) => applySetting("effort", e.target.value)}>
-                {EFFORTS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
+              <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />
+              <span className="mode-tag" title="permission mode · Shift+Tab cycles">{mode}</span>
             </div>
           </>
         )}

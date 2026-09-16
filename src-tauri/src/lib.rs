@@ -125,14 +125,17 @@ fn send_message(
 }
 
 /// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
-/// `oauthAccount` from ~/.claude.json (plan / org type for the status bar); Null if unavailable.
+/// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
 #[tauri::command]
-fn account_info() -> serde_json::Value {
-    std::fs::read_to_string(format!("{}/.claude.json", home()))
+fn run_statusline(json: String) -> String {
+    let cmd = std::fs::read_to_string(format!("{}/.claude/settings.json", home()))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .map(|v| v["oauthAccount"].clone())
-        .unwrap_or(serde_json::Value::Null)
+        .and_then(|v| v["statusLine"]["command"].as_str().map(String::from));
+    let Some(cmd) = cmd else { return String::new() };
+    let Ok(mut child) = Command::new("sh").args(["-c", &cmd]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return String::new() };
+    let _ = child.stdin.take().unwrap().write_all(json.as_bytes());
+    child.wait_with_output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
 // ---- PTY terminal panes ----------------------------------------------------------------------
@@ -378,7 +381,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, account_info, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
