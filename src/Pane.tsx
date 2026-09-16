@@ -31,7 +31,7 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
   const runInTerm = (cmd: string) => { pending.current = cmd; if (seen.term) { switchTo("term"); flush(); } else switchTo("term"); };
   /** Ctrl+C in the chat = end the claude session (like the CLI): drop the chat; the next Ctrl+A starts fresh where the shell is. */
   const endAgent = () => {
-    setSeen((s) => ({ ...s, agent: false }));
+    setSeen({ term: true, agent: false }); // panes that began as a chat have no shell yet: mount one now
     setMode("term");
     api.updateParameters({ ...params, mode: "term", resume: undefined, title: undefined, fork: undefined, quote: undefined });
     localStorage.setItem("x-term.layout", JSON.stringify(containerApi.toJSON()));
