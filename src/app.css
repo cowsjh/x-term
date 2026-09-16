@@ -65,6 +65,14 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .ask-q button { margin: 2px 4px 2px 0; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 3px 10px; cursor: pointer; }
 .ask-q button.sel { background: #3b6ea5; border-color: #3b6ea5; color: #fff; }
 .ask-q input { background: #111; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font: 12px inherit; }
+.msg.thinking { background: none; color: #777; font-size: 12px; padding: 2px 10px; margin: 2px 0; white-space: pre-wrap; }
+.msg.thinking summary { cursor: pointer; }
+.tasks, .todos { list-style: none; margin: 0; padding: 2px 8px; font: 12px ui-monospace, monospace; color: #aaa; }
+.tasks li.completed, .todos li.completed { color: #666; text-decoration: line-through; }
+.tasks li.in_progress, .todos li.in_progress { color: #d7af00; }
+.tool-sub { margin: 4px 0 0 14px; padding-left: 8px; border-left: 1px solid #444; color: #999; font-size: 12px; }
+.perm.plan .plan-body { max-height: 40vh; overflow: auto; background: #111; padding: 6px 10px; border-radius: 4px; margin-bottom: 6px; font-size: 13px; }
+.perm.plan input { width: 100%; box-sizing: border-box; margin-bottom: 6px; background: #111; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; }
 .msg.user.queued { opacity: .55; border: 1px dashed #4a5f80; background: none; }
 .perm pre { margin: 0 0 6px; background: #111; padding: 6px; border-radius: 4px; white-space: pre-wrap; max-height: 160px; overflow: auto; font-size: 12px; }
 .perm button { margin-right: 6px; background: #2a3a55; color: #ddd; border: 1px solid #446; border-radius: 4px; padding: 3px 10px; cursor: pointer; }

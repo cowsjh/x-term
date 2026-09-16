@@ -8,12 +8,15 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { ToolCard, ToolMsg } from "./ToolCard";
+import { ToolCard, ToolMsg, SubStep } from "./ToolCard";
 import { Menu } from "./Menu";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
-type Msg = { role: "user" | "assistant" | "err"; text: string; images?: Img[] } | ToolMsg;
+type Msg = { role: "user" | "assistant" | "err" | "thinking"; text: string; images?: Img[] } | ToolMsg;
+type Task = { subject: string; status: string };
+const TASK_ICON: Record<string, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
+const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
 type SessionInfo = { id: string; mtime: number; summary: string };
 type Perm = { request_id: string; tool_name: string; input: any; description?: string; permission_suggestions?: any[] };
 const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
@@ -150,6 +153,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   queueRef.current = queue;
   const [picks, setPicks] = useState<Record<string, string[]>>({}); // AskUserQuestion answers in progress
   const threadMsgs = useRef<Record<string, Msg[]>>({});
+  const [tasks, setTasks] = useState<Record<string, Task>>({}); // TodoWrite / TaskCreate / TaskUpdate checklist
+  const [planNote, setPlanNote] = useState(""); // ExitPlanMode "keep planning" feedback
+  const addSub = (parent: string, step: SubStep) =>
+    setMsgs((m) => m.map((x) => (x.role === "tool" && x.id === parent ? { ...x, sub: [...(x.sub ?? []), step] } : x)));
   const [activity, setActivity] = useState(""); // CLI-style status line: what is running right now
   const [tick, setTick] = useState(0); // 1s re-render while busy for the elapsed counter
   const turn = useRef({ start: 0, tools: 0, done: "" });
@@ -249,6 +256,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           break;
         case "conversation_reset": // `/clear`: CLI starts a fresh session in the same process
           setMsgs([]);
+          setTasks({});
           switchThreads(undefined); // new conversation, new thread set (the next init names it)
           info.current.cost = 0;
           info.current.usage = undefined;
@@ -263,8 +271,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           if (ev.response?.subtype === "error") setMsgs((m) => [...m, { role: "err", text: ev.response.error }]);
           break;
         case "stream_event": {
+          if (ev.parent_tool_use_id) break; // sub-agent stream: its full messages are attached to the Agent card instead
           const d = ev.event;
-          if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
+          if (d.type === "content_block_start" && d.content_block?.type === "thinking") {
+            setActivity("Thinking");
+            setMsgs((m) => [...m, { role: "thinking", text: "" }]);
+          } else if (d.type === "content_block_delta" && d.delta?.type === "thinking_delta" && d.delta.thinking) {
+            setMsgs((m) => { const last = m[m.length - 1]; return last?.role === "thinking" ? [...m.slice(0, -1), { role: "thinking", text: last.text + d.delta.thinking }] : m; });
+          } else if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
             streaming.current = "";
             const b = d.content_block;
             turn.current.tools++;
@@ -281,8 +295,21 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           break;
         }
         case "assistant":
+          if (ev.parent_tool_use_id) {
+            for (const b of ev.message?.content ?? []) {
+              if (b.type === "tool_use") addSub(ev.parent_tool_use_id, { name: b.name, text: toolSummary(b.input) });
+              else if (b.type === "text" && b.text) addSub(ev.parent_tool_use_id, { text: b.text });
+            }
+            break;
+          }
           if (ev.message?.usage) info.current.usage = ev.message.usage;
           for (const b of ev.message?.content ?? []) {
+            if (b.type === "thinking" && b.thinking) // when deltas were empty (hidden), the full block may still carry text
+              setMsgs((m) => { const i = m.map((x) => x.role).lastIndexOf("thinking"); return i >= 0 && !(m[i] as any).text ? m.map((x, j) => (j === i ? { role: "thinking", text: b.thinking } : x)) : m; });
+            if (b.type === "tool_use" && b.name === "TodoWrite" && Array.isArray(b.input?.todos))
+              setTasks(Object.fromEntries(b.input.todos.map((t: any, i: number) => [String(i), { subject: t.content, status: t.status }])));
+            if (b.type === "tool_use" && b.name === "TaskUpdate" && b.input?.taskId)
+              setTasks((t) => (t[b.input.taskId] ? { ...t, [b.input.taskId]: { ...t[b.input.taskId], status: b.input.status ?? t[b.input.taskId].status } } : t));
             if (b.type === "tool_use") setActivity(`${b.name} ${toolSummary(b.input)}`.slice(0, 120));
             if (b.type === "tool_use")
               setMsgs((m) => m.some((x) => x.role === "tool" && x.id === b.id)
@@ -295,15 +322,22 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         case "user":
           for (const b of ev.message?.content ?? []) {
             if (b.type === "tool_result") {
-              setActivity("Thinking");
               const t = typeof b.content === "string" ? b.content : (b.content ?? []).map((c: any) => c.text ?? "").join("\n");
+              if (ev.parent_tool_use_id) { addSub(ev.parent_tool_use_id, { text: `↳ ${t}` }); continue; }
+              setActivity("Thinking");
+              const created = /^Task #(\d+) created successfully: (.*)$/m.exec(t);
+              if (created) setTasks((tk) => ({ ...tk, [created[1]]: { subject: created[2], status: "pending" } }));
               setMsgs((m) => m.map((x) => (x.role === "tool" && x.id === b.tool_use_id ? { ...x, result: t, error: !!b.is_error } : x)));
             }
           }
           break;
         case "result":
           sessionId.current = ev.session_id;
-          turn.current.done = `${ev.is_error ? "✗" : "✓"} ${fmtSec(Date.now() - turn.current.start)} · ${turn.current.tools} tools · $${(ev.total_cost_usd ?? 0).toFixed(3)}`;
+          {
+            const u = ev.usage ?? {};
+            const tin = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+            turn.current.done = `${ev.is_error ? "✗" : "✓"} ${fmtSec(ev.duration_ms ?? Date.now() - turn.current.start)} · ${turn.current.tools} tools · ↑${fmtTok(tin)} ↓${fmtTok(u.output_tokens ?? 0)} · $${(ev.total_cost_usd ?? 0).toFixed(3)}`;
+          }
           setActivity("");
           onState?.({ resume: ev.session_id });
           onDone?.(lastText.current);
@@ -367,6 +401,21 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const questions: any[] = perm?.tool_name === "AskUserQuestion" ? perm.input?.questions ?? [] : [];
   const pick = (q: any, label: string) =>
     setPicks((p) => ({ ...p, [q.question]: q.multiSelect ? (p[q.question]?.includes(label) ? p[q.question].filter((l) => l !== label) : [...(p[q.question] ?? []), label]) : [label] }));
+  // ExitPlanMode: accept = allow (optionally switching the session to acceptEdits); keep planning = deny with feedback
+  const plan: string | null = perm?.tool_name === "ExitPlanMode" ? perm.input?.plan ?? "" : null;
+  const acceptPlan = (autoEdit: boolean) => {
+    if (!perm) return;
+    const response = { behavior: "allow", updatedInput: perm.input, ...(autoEdit ? { updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] } : {}) };
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
+    setPerm(null);
+    if (autoEdit) { setMode("acceptEdits"); localStorage.setItem(MODE_KEY, "acceptEdits"); }
+  };
+  const keepPlanning = () => {
+    if (!perm) return;
+    const response = { behavior: "deny", message: planNote.trim() ? `Keep planning. Feedback: ${planNote.trim()}` : "Keep planning; the user wants to refine the plan." };
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
+    setPerm(null); setPlanNote("");
+  };
   const submitAnswers = () => {
     if (!questions.every((q) => picks[q.question]?.length)) return;
     answerPerm("allow", false, { ...perm!.input, answers: Object.fromEntries(questions.map((q) => [q.question, picks[q.question].join(", ")])) });
@@ -397,6 +446,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     switchThreads(sess.id);
     const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
     setMsgs(toMsgs(hist));
+    setTasks({});
     onState?.({ resume: sess.id, title: sess.summary.slice(0, 30) });
     info.current.cost = 0;
     setGen((g) => g + 1); // restart process with --resume
@@ -533,7 +583,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : (
           <div key={i} className={`msg ${m.role}`}>
             {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} />)}
-            {m.role === "err" ? m.text : <Markdown {...plugins}>{m.text}</Markdown>}
+            {m.role === "err" ? m.text : m.role === "thinking" ? <details><summary>thinking{m.text ? "" : " (hidden)"}</summary>{m.text}</details> : <Markdown {...plugins}>{m.text}</Markdown>}
           </div>
         ))}
         {queue.map((q, i) => (
@@ -561,6 +611,18 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       <div className="composer">
         {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => <span key={i} className="chip" title={p.slice(0, 500)} onClick={() => { setPastes((x) => x.filter((_, j) => j !== i)); setInput((v) => v.replace(new RegExp(`\\[Pasted text #${i + 1}[^\\]]*\\] ?`), "")); }}>#{i + 1}: {p.split("\n").length} lines ✕</span>)}</div>}
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
+        {perm && plan !== null && (
+          <div className="perm plan">
+            <div className="perm-title">Plan ready · approve?</div>
+            <div className="plan-body"><Markdown {...plugins}>{plan}</Markdown></div>
+            <input value={planNote} placeholder="feedback for keep planning (optional)" onChange={(e) => setPlanNote(e.target.value)} />
+            <div>
+              <button onClick={() => acceptPlan(true)}>Accept, auto-accept edits</button>
+              <button onClick={() => acceptPlan(false)}>Accept</button>
+              <button onClick={keepPlanning}>Keep planning</button>
+            </div>
+          </div>
+        )}
         {perm && questions.length > 0 && (
           <div className="perm ask">
             {questions.map((q) => (
@@ -578,7 +640,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             </div>
           </div>
         )}
-        {perm && !questions.length && (
+        {perm && !questions.length && plan === null && (
           <div className="perm">
             <div className="perm-title">{perm.tool_name} {perm.description ? `· ${perm.description}` : ""}</div>
             <pre>{typeof perm.input?.command === "string" ? perm.input.command : perm.input?.file_path ?? JSON.stringify(perm.input, null, 1).slice(0, 600)}</pre>
@@ -604,6 +666,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {files.length > 0 && !slash.length && (
           <ul className="slash">
             {files.map((f, i) => <li key={f} className={i === slashIdx ? "sel" : ""} onMouseDown={() => pickFile(f)}>@{f}</li>)}
+          </ul>
+        )}
+        {Object.keys(tasks).length > 0 && (
+          <ul className="tasks">
+            {Object.entries(tasks).map(([k, t]) => <li key={k} className={t.status}>{TASK_ICON[t.status] ?? "☐"} {t.subject}</li>)}
           </ul>
         )}
         <div className="activity">
