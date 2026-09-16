@@ -47,20 +47,40 @@ function touchThreadIndex(sid: string) {
   localStorage.setItem(THREAD_INDEX, JSON.stringify(idx));
 }
 
-function Pre(props: React.ComponentProps<"pre">) {
+let mermaidSeq = 0;
+/** ```mermaid fences: rendered to SVG (lazy-loaded lib). While streaming / on a parse error the raw code block shows instead. */
+function Mermaid({ code, children }: { code: string; children: React.ReactNode }) {
+  const [svg, setSvg] = useState("");
+  useEffect(() => {
+    let live = true;
+    // debounce: streaming rewrites `code` every delta; render only once it settles, so partial diagrams never flash
+    const t = setTimeout(() => import("mermaid").then(async ({ default: m }) => {
+      m.initialize({ startOnLoad: false, look: "classic", theme: "base", themeVariables: { fontSize: "15px", fontFamily: "system-ui, sans-serif", primaryColor: "#3a3a3a", primaryTextColor: "#e6e6e6", primaryBorderColor: "#777", lineColor: "#aaa", secondaryColor: "#2e2e2e", tertiaryColor: "#333", edgeLabelBackground: "#262626" }, flowchart: { padding: 16, nodeSpacing: 60, rankSpacing: 60 } });
+      try { const r = await m.render(`mmd-${++mermaidSeq}`, code); if (live) setSvg(r.svg); }
+      catch { /* partial/invalid mid-stream: keep last good SVG (raw block if none yet), never flip back */ }
+    }), 200);
+    return () => { live = false; clearTimeout(t); };
+  }, [code]);
+  return svg ? <div className="mermaid" dangerouslySetInnerHTML={{ __html: svg }} /> : <>{children}</>;
+}
+function Pre({ "data-mermaid": mmd, ...props }: React.ComponentProps<"pre"> & { "data-mermaid"?: string }) {
   const ref = useRef<HTMLPreElement>(null);
   const [ok, setOk] = useState(false);
-  return (
+  const pre = (
     <div className="codewrap">
-      <button className="copy" onClick={() => { navigator.clipboard.writeText(ref.current?.innerText ?? ""); setOk(true); setTimeout(() => setOk(false), 1200); }}>{ok ? "copied" : "copy"}</button>
+      <button className="copy" onClick={() => { navigator.clipboard.writeText(ref.current?.innerText ?? mmd ?? ""); setOk(true); setTimeout(() => setOk(false), 1200); }}>{ok ? "copied" : "copy"}</button>
       <pre ref={ref} {...props} />
     </div>
   );
+  return mmd ? <Mermaid code={mmd}>{pre}</Mermaid> : pre;
 }
-/** Tags `pre > code` with data-block so Code can tell fenced blocks from inline code (highlighting turns children into spans). */
+/** Tags `pre > code` with data-block so Code can tell fenced blocks from inline code (highlighting turns children into spans); ```mermaid source goes on the pre for Pre/Mermaid. */
 function markBlocks() {
   const walk = (n: any) => {
-    if (n.type === "element" && n.tagName === "pre") for (const c of n.children ?? []) if (c.tagName === "code") c.properties = { ...c.properties, dataBlock: true };
+    if (n.type === "element" && n.tagName === "pre") for (const c of n.children ?? []) if (c.tagName === "code") {
+      c.properties = { ...c.properties, dataBlock: true };
+      if ((c.properties.className ?? []).includes("language-mermaid")) n.properties = { ...n.properties, dataMermaid: c.children.map((t: any) => t.value ?? "").join("") };
+    }
     for (const c of n.children ?? []) walk(c);
   };
   return walk;
@@ -176,7 +196,9 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
   };
   useEffect(() => {
     const d = api.onDidActiveChange(({ isActive }) => { if (isActive) setUnread(false); });
-    return () => d.dispose();
+    const onFocus = () => { if (api.isActive) setUnread(false); }; // answer landed while the window was unfocused but this pane was already active: no active-change fires
+    window.addEventListener("focus", onFocus);
+    return () => { d.dispose(); window.removeEventListener("focus", onFocus); };
   }, [api]);
   useEffect(() => { api.setTitle((unread ? "● " : "") + (params.title ?? api.title ?? "").replace(/^● /, "")); }, [unread, params.title]);
   const onState: ChatProps["onState"] = (st) => {

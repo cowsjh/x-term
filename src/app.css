@@ -92,6 +92,8 @@ html, body, #root { height: 100%; margin: 0; background: var(--bg); color: var(-
 .diff pre.del { background: #3a1a1a; color: #f99; }
 .to-bottom { position: sticky; bottom: 8px; float: right; margin-right: 8px; background: var(--accent); color: #fff; border: none; border-radius: 50%; width: 28px; height: 28px; cursor: pointer; z-index: 3; }
 .codewrap { position: relative; }
+.msg .mermaid { background: transparent; padding: 8px; border-radius: 4px; overflow-x: auto; }
+.msg .mermaid svg { max-width: 100%; height: auto; }
 .codewrap .copy { position: absolute; top: 4px; right: 4px; background: var(--border2); color: var(--dim); border: none; border-radius: 3px; font-size: 11px; padding: 2px 6px; cursor: pointer; opacity: 0; }
 .codewrap:hover .copy { opacity: 1; }
 code.inline { cursor: pointer; }
