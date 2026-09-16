@@ -124,10 +124,10 @@ fn send_message(
     s.stdin.flush().map_err(|e| e.to_string())
 }
 
-/// Writes an exported conversation to ~/x-term-exports/<name>.md and returns the path.
+/// Writes an exported conversation to ~/Downloads/<name>.md and returns the path.
 #[tauri::command]
 fn save_export(name: String, content: String) -> Result<String, String> {
-    let dir = std::path::PathBuf::from(home()).join("x-term-exports");
+    let dir = std::path::PathBuf::from(home()).join("Downloads");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{name}.md"));
     std::fs::write(&path, content).map_err(|e| e.to_string())?;

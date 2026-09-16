@@ -123,7 +123,13 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     const t = e.target as HTMLTextAreaElement;
     const has = (t.selectionStart != null && t.selectionStart !== t.selectionEnd) || !!sel();
     if (e.ctrlKey && !e.shiftKey && e.key === "c" && !has) { e.preventDefault(); onEnd(); }
-    if (e.ctrlKey && e.key === "f") { e.preventDefault(); setFind((f) => f ?? ""); setTimeout(() => (document.querySelector(`#find-${api.id}`) as HTMLInputElement)?.select(), 0); }
+    if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "f") { e.preventDefault(); e.stopPropagation(); openFind(); }
+  };
+  const findRef = useRef<HTMLInputElement>(null);
+  const openFind = () => {
+    setFind((f) => f ?? "");
+    // dockview re-focuses the active panel on pointer/keyboard activity; claim focus after it does
+    for (const ms of [0, 50, 150]) setTimeout(() => { const el = findRef.current; if (el && document.activeElement !== el) { el.focus(); el.select(); } }, ms);
   };
   const onFindKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") { e.preventDefault(); (window as any).find(e.currentTarget.value, false, e.shiftKey, true, false, true, false); }
@@ -146,11 +152,11 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     notify(params.title ?? api.title ?? "x-term", text.slice(0, 120));
   };
   return (
-    <div className="pane-wrap" onContextMenu={onCtx} onKeyDown={onKey}>
-      {find !== null && <input id={`find-${api.id}`} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
+    <div className="pane-wrap" onContextMenu={onCtx} onKeyDownCapture={onKey}>
+      {find !== null && <input ref={findRef} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
       {toast && <div className="toast">{toast}</div>}
       <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} onEnd={onEnd} onMsgs={(m) => { msgsRef.current = m; }} />
-      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Find", key: "f", run: () => setFind((f) => f ?? "") }, { label: "Export markdown", key: "e", run: exportMd }, { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Find", key: "f", run: openFind }, { label: "Export markdown", key: "e", run: exportMd }, { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
 }
