@@ -86,3 +86,7 @@ code.inline.copied { background: #2a5a2a; }
 .activity { font: 12px ui-monospace, monospace; color: #cbd; padding: 2px 4px; min-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .activity .spin { color: #e8a; display: inline-block; width: 1em; }
 .activity .dim { color: #777; }
+.msg table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+.msg th, .msg td { border: 1px solid #555; padding: 3px 8px; text-align: left; }
+.msg th { background: #333; }
+.msg tr:nth-child(even) td { background: #242424; }
