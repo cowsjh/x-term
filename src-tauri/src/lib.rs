@@ -124,7 +124,16 @@ fn send_message(
     s.stdin.flush().map_err(|e| e.to_string())
 }
 
-/// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
+/// Writes an exported conversation to ~/x-term-exports/<name>.md and returns the path.
+#[tauri::command]
+fn save_export(name: String, content: String) -> Result<String, String> {
+    let dir = std::path::PathBuf::from(home()).join("x-term-exports");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{name}.md"));
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
 #[tauri::command]
 fn run_statusline(json: String) -> String {
@@ -403,7 +412,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Sessions::default())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, save_export, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

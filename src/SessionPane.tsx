@@ -7,6 +7,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { ToolCard, ToolMsg, SubStep } from "./ToolCard";
 import { ansiToHtml } from "./ansi";
@@ -46,15 +47,25 @@ function Pre(props: React.ComponentProps<"pre">) {
     </div>
   );
 }
+/** Tags `pre > code` with data-block so Code can tell fenced blocks from inline code (highlighting turns children into spans). */
+function markBlocks() {
+  const walk = (n: any) => {
+    if (n.type === "element" && n.tagName === "pre") for (const c of n.children ?? []) if (c.tagName === "code") c.properties = { ...c.properties, dataBlock: true };
+    for (const c of n.children ?? []) walk(c);
+  };
+  return walk;
+}
 /** Inline code: click to copy. Block code keeps its own copy button via Pre. */
-function Code(props: React.ComponentProps<"code">) {
+function Code(props: React.ComponentProps<"code"> & { "data-block"?: boolean }) {
   const [ok, setOk] = useState(false);
+  if (props["data-block"]) return <code {...props} />;
   const text = String(props.children ?? "");
-  if (text.includes("\n")) return <code {...props} />;
   return <code {...props} className={`${props.className ?? ""} inline ${ok ? "copied" : ""}`} title="click to copy"
     onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 800); }} />;
 }
-const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex], components: { pre: Pre, code: Code } };
+const plugins = { remarkPlugins: [remarkGfm, remarkMath], rehypePlugins: [rehypeKatex, markBlocks, [rehypeHighlight, { ignoreMissing: true }] as any], components: { pre: Pre, code: Code } };
+/** Conversation as markdown (for export). */
+const toMarkdown = (msgs: Msg[]) => msgs.map((m) => m.role === "user" ? `## User\n\n${m.text}` : m.role === "assistant" ? `## Assistant\n\n${m.text}` : m.role === "tool" ? `> **${m.name}** ${toolSummary(m.input)}${m.result ? `\n\n\`\`\`\n${m.result.slice(0, 4000)}\n\`\`\`` : ""}` : "").filter(Boolean).join("\n\n");
 // Long multi-line pastes become a chip (like the CLI's "[Pasted text #N]") and are expanded back into the prompt on send
 const SPIN = ["✻", "✽", "✶", "✳", "✢", "·"];
 const fmtSec = (ms: number) => `${Math.max(0, Math.round(ms / 1000))}s`;
@@ -84,6 +95,14 @@ const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void; onTerminal: (cmd: string) => void }) {
   const [unread, setUnread] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [find, setFind] = useState<string | null>(null); // Ctrl+F: in-conversation search (WebKit window.find)
+  const [toast, setToast] = useState("");
+  const msgsRef = useRef<Msg[]>([]);
+  const exportMd = async () => {
+    const name = `${(params.title ?? api.title ?? "session").replace(/[^\w가-힣-]+/g, "_").slice(0, 40)}-${(params.resume ?? api.id).slice(0, 8)}`;
+    const path = await invoke<string>("save_export", { name, content: toMarkdown(msgsRef.current) }).catch((e) => `export failed: ${e}`);
+    setToast(path); setTimeout(() => setToast(""), 4000);
+  };
   // right-click anywhere in the chat -> pane menu (inputs and thread windows keep the native menu)
   const onCtx = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("textarea, input, select, .thread, .slash, .perm")) return;
@@ -96,6 +115,11 @@ export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }:
     const t = e.target as HTMLTextAreaElement;
     const has = (t.selectionStart != null && t.selectionStart !== t.selectionEnd) || !!sel();
     if (e.ctrlKey && !e.shiftKey && e.key === "c" && !has) { e.preventDefault(); onSwitch(); }
+    if (e.ctrlKey && e.key === "f") { e.preventDefault(); setFind((f) => f ?? ""); setTimeout(() => (document.querySelector(`#find-${api.id}`) as HTMLInputElement)?.select(), 0); }
+  };
+  const onFindKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") { e.preventDefault(); (window as any).find(e.currentTarget.value, false, e.shiftKey, true, false, true, false); }
+    if (e.key === "Escape") { setFind(null); (document.querySelector(".slot.agent textarea") as HTMLElement)?.focus(); }
   };
   useEffect(() => {
     const d = api.onDidActiveChange(({ isActive }) => { if (isActive) setUnread(false); });
@@ -115,8 +139,10 @@ export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }:
   };
   return (
     <div className="pane-wrap" onContextMenu={onCtx} onKeyDown={onKey}>
-      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} />
-      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
+      {find !== null && <input id={`find-${api.id}`} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
+      {toast && <div className="toast">{toast}</div>}
+      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} onMsgs={(m) => { msgsRef.current = m; }} />
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Find", key: "f", run: () => setFind((f) => f ?? "") }, { label: "Export markdown", key: "e", run: exportMd }, { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
 }
