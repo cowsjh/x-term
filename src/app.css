@@ -60,6 +60,12 @@ html, body, #root { height: 100%; margin: 0; background: #1e1e1e; color: #ddd; f
 .mode { background: #111; color: #aaa; border: 1px solid #333; border-radius: 4px; font: 12px ui-monospace, monospace; }
 .perm { background: #3a2f10; border: 1px solid #8a6d1a; border-radius: 4px; padding: 6px 8px; font-size: 13px; }
 .perm-title { font-weight: bold; margin-bottom: 4px; }
+.perm.ask { background: #1d2a3a; border-color: #3b6ea5; }
+.ask-q { margin-bottom: 8px; }
+.ask-q button { margin: 2px 4px 2px 0; background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+.ask-q button.sel { background: #3b6ea5; border-color: #3b6ea5; color: #fff; }
+.ask-q input { background: #111; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 3px 6px; font: 12px inherit; }
+.msg.user.queued { opacity: .55; border: 1px dashed #4a5f80; background: none; }
 .perm pre { margin: 0 0 6px; background: #111; padding: 6px; border-radius: 4px; white-space: pre-wrap; max-height: 160px; overflow: auto; font-size: 12px; }
 .perm button { margin-right: 6px; background: #2a3a55; color: #ddd; border: 1px solid #446; border-radius: 4px; padding: 3px 10px; cursor: pointer; }
 .perm button:hover { background: #3b6ea5; }

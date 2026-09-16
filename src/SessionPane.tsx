@@ -135,15 +135,21 @@ type ChatProps = {
   id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean;
   onState?: (s: { cwd?: string; resume?: string; title?: string }) => void; // session id / cwd / title changed
   onDone?: (lastText: string) => void; // a turn finished
+  onMsgs?: (msgs: Msg[]) => void; // message list changed (threads report up so the parent can merge them)
 };
 
 /** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
-function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone }: ChatProps) {
+function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone, onMsgs }: ChatProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
   const [pastes, setPastes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [queue, setQueue] = useState<{ text: string; images: Img[] }[]>([]); // prompts typed while a turn runs; sent one per result
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const [picks, setPicks] = useState<Record<string, string[]>>({}); // AskUserQuestion answers in progress
+  const threadMsgs = useRef<Record<string, Msg[]>>({});
   const [activity, setActivity] = useState(""); // CLI-style status line: what is running right now
   const [tick, setTick] = useState(0); // 1s re-render while busy for the elapsed counter
   const turn = useRef({ start: 0, tools: 0, done: "" });
@@ -307,8 +313,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           const mu = Object.values(ev.modelUsage ?? {}) as any[];
           const cw = Math.max(0, ...mu.map((m) => m?.contextWindow ?? 0));
           if (cw) info.current.ctx = cw;
-          setBusy(false);
           refreshStatus();
+          const next = queueRef.current[0];
+          if (next) { setQueue((q) => q.slice(1)); postRef.current(next.text, next.images, true); } else setBusy(false);
           break;
         case "stderr":
           setMsgs((m) => [...m, { role: "err", text: ev.text }]);
@@ -347,13 +354,22 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
 
   const control = (request: object) =>
     invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(), request }) }).catch(() => {});
-  const answerPerm = (behavior: "allow" | "deny", always = false) => {
+  const answerPerm = (behavior: "allow" | "deny", always = false, updatedInput = perm?.input) => {
     if (!perm) return;
     const response = behavior === "allow"
-      ? { behavior, updatedInput: perm.input, ...(always && perm.permission_suggestions ? { updatedPermissions: perm.permission_suggestions } : {}) }
+      ? { behavior, updatedInput, ...(always && perm.permission_suggestions ? { updatedPermissions: perm.permission_suggestions } : {}) }
       : { behavior, message: "User denied this action" };
     invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
     setPerm(null);
+    setPicks({});
+  };
+  // AskUserQuestion: the CLI's picker is a can_use_tool request; answers go back as updatedInput.answers {question: label(s)}
+  const questions: any[] = perm?.tool_name === "AskUserQuestion" ? perm.input?.questions ?? [] : [];
+  const pick = (q: any, label: string) =>
+    setPicks((p) => ({ ...p, [q.question]: q.multiSelect ? (p[q.question]?.includes(label) ? p[q.question].filter((l) => l !== label) : [...(p[q.question] ?? []), label]) : [label] }));
+  const submitAnswers = () => {
+    if (!questions.every((q) => picks[q.question]?.length)) return;
+    answerPerm("allow", false, { ...perm!.input, answers: Object.fromEntries(questions.map((q) => [q.question, picks[q.question].join(", ")])) });
   };
   const applyMode = (m: string) => {
     setMode(m);
@@ -395,14 +411,31 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       setSessions((await invoke<SessionInfo[]>("list_sessions", { cwd })).filter((s) => !forks.has(s.id)));
       return;
     }
-    if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
     if (text) { const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]").filter((x: string) => x !== text); h.push(text); localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-100))); }
     histPos.current = -1;
+    setInput(""); setImages([]); setPastes([]); setSlash([]);
+    post(text, images);
+  };
+  /** Send now, or park in the queue while a turn is running (drained one per `result`). */
+  const post = (text: string, images: Img[], force = false) => {
+    if (busy && !force) { setQueue((q) => [...q, { text, images }]); return; }
+    if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
     setMsgs((m) => [...m, { role: "user", text, images }]);
-    setInput(""); setImages([]); setPastes([]); setBusy(true); setSlash([]); setAtBottom(true);
+    setBusy(true); setAtBottom(true);
     turn.current = { start: Date.now(), tools: 0, done: "" };
     setActivity("Thinking");
-    await invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
+    invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
+  };
+  const postRef = useRef(post); // the event listener closure is bound once per process; always call the latest post
+  postRef.current = post;
+  useEffect(() => { onMsgs?.(msgs); }, [msgs]);
+  /** Fold a thread's exchange into this conversation as one user message, then drop the thread. */
+  const mergeThread = (t: Thread) => {
+    const body = (threadMsgs.current[t.id] ?? []).filter((m) => m.role === "user" || m.role === "assistant").map((m) => `**${m.role === "user" ? "User" : "Assistant"}:** ${m.text}`).join("\n\n");
+    if (!body) return;
+    post(`[Merged side thread about: "${t.quote.slice(0, 200)}"]\n\n${body}\n\n(Treat the above as part of our conversation. Reply with a one-line acknowledgement.)`, []);
+    patchThread(t.id, null);
+    delete threadMsgs.current[t.id];
   };
 
   const onInput = (v: string) => {
@@ -440,7 +473,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-    if (e.key === "Escape" && busy) control({ subtype: "interrupt" });
+    if (e.key === "Escape" && busy) { control({ subtype: "interrupt" }); setQueue([]); }
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
@@ -503,6 +536,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             {m.role === "err" ? m.text : <Markdown {...plugins}>{m.text}</Markdown>}
           </div>
         ))}
+        {queue.map((q, i) => (
+          <div key={`q${i}`} className="msg user queued" title="Sent when the current turn finishes">
+            <span className="dim">queued · {SPIN[tick % SPIN.length]}</span> {q.text.slice(0, 300)}
+          </div>
+        ))}
         {!atBottom && <button className="to-bottom" onClick={() => { setAtBottom(true); listRef.current?.scrollTo(0, listRef.current.scrollHeight); }}>↓</button>}
         {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>}
       </div>
@@ -512,17 +550,35 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             <span>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
             <span>
               <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, { open: !t.open }); }}>{t.open ? "hide" : "show"}</button>
+              <button onClick={(e) => { e.stopPropagation(); mergeThread(t); }} title="Inject this thread's conversation into the main session" disabled={!threadMsgs.current[t.id]?.some((m) => m.role === "assistant")}>merge</button>
               <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }}>close</button>
             </span>
           </div>
-          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}><Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact onState={(st) => st.resume && patchThread(t.id, { sid: st.resume })} /></div>
+          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}><Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact onState={(st) => st.resume && patchThread(t.id, { sid: st.resume })} onMsgs={(m) => { threadMsgs.current[t.id] = m; setTick((x) => x + 1); }} /></div>
         </div>,
         document.body,
       ))}
       <div className="composer">
         {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => <span key={i} className="chip" title={p.slice(0, 500)} onClick={() => { setPastes((x) => x.filter((_, j) => j !== i)); setInput((v) => v.replace(new RegExp(`\\[Pasted text #${i + 1}[^\\]]*\\] ?`), "")); }}>#{i + 1}: {p.split("\n").length} lines ✕</span>)}</div>}
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
-        {perm && (
+        {perm && questions.length > 0 && (
+          <div className="perm ask">
+            {questions.map((q) => (
+              <div key={q.question} className="ask-q">
+                <div className="perm-title">{q.header ? `${q.header} · ` : ""}{q.question}{q.multiSelect ? " (multi)" : ""}</div>
+                {q.options?.map((o: any) => (
+                  <button key={o.label} className={picks[q.question]?.includes(o.label) ? "sel" : ""} title={o.description} onClick={() => pick(q, o.label)}>{o.label}</button>
+                ))}
+                <input placeholder="other…" onKeyDown={(e) => { if (e.key === "Enter" && e.currentTarget.value.trim()) { pick(q, e.currentTarget.value.trim()); e.currentTarget.value = ""; } }} />
+              </div>
+            ))}
+            <div>
+              <button onClick={submitAnswers} disabled={!questions.every((q) => picks[q.question]?.length)}>Submit</button>
+              <button onClick={() => answerPerm("deny")}>Cancel</button>
+            </div>
+          </div>
+        )}
+        {perm && !questions.length && (
           <div className="perm">
             <div className="perm-title">{perm.tool_name} {perm.description ? `· ${perm.description}` : ""}</div>
             <pre>{typeof perm.input?.command === "string" ? perm.input.command : perm.input?.file_path ?? JSON.stringify(perm.input, null, 1).slice(0, 600)}</pre>
