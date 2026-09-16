@@ -5,7 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon } from "@xterm/addon-search";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { onEvent, warn } from "./events";
 import "@xterm/xterm/css/xterm.css";
 import { Menu } from "./Menu";
 
@@ -29,7 +29,7 @@ export function TermPane({ id, cwd, onSwitch, onExit, onReady }: { id: string; c
     const term = new Terminal({ fontFamily: "ui-monospace, monospace", fontSize: 13, scrollback: 5000, theme: { background: "#1e1e1e" } });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon((_e, uri) => { openUrl(uri).catch(() => {}); })); // click URLs -> system browser
+    term.loadAddon(new WebLinksAddon((_e, uri) => { openUrl(uri).catch(warn); })); // click URLs -> system browser
     const search = new SearchAddon();
     term.loadAddon(search);
     searchRef.current = search;
@@ -43,15 +43,15 @@ export function TermPane({ id, cwd, onSwitch, onExit, onReady }: { id: string; c
       if (e.ctrlKey && e.shiftKey && e.code === "KeyF") { if (e.type === "keydown") { setSearch((s) => s ?? ""); setTimeout(() => (document.querySelector(`#tsearch-${id}`) as HTMLInputElement)?.select(), 0); } return false; }
       return true;
     });
-    const unData = listen<{ id: string; line: string }>("pty-data", ({ payload }) => { if (payload.id === id) term.write(payload.line); });
-    const unExit = listen<string>("pty-exit", ({ payload }) => { if (payload === id) cb.current.onExit(); });
+    const offData = onEvent<{ id: string; line: string }>("pty-data", id, (p) => term.write(p.line));
+    const offExit = onEvent<{ id: string }>("pty-exit", id, () => cb.current.onExit());
     invoke("pty_open", { id, cwd: cwd ?? null, cols: term.cols, rows: term.rows }).then(() => setTimeout(() => cb.current.onReady?.(), 300)).catch((e) => term.write(`\r\n${e}\r\n`));
-    term.onData((data) => invoke("pty_write", { id, data }).catch(() => {}));
-    term.onResize(({ cols, rows }) => invoke("pty_resize", { id, cols, rows }).catch(() => {}));
+    term.onData((data) => invoke("pty_write", { id, data }).catch(warn));
+    term.onResize(({ cols, rows }) => invoke("pty_resize", { id, cols, rows }).catch(warn));
     const ro = new ResizeObserver(() => { if (ref.current?.offsetHeight) fit.fit(); }); // also refits when the slot becomes visible again
     ro.observe(ref.current!);
     term.focus();
-    return () => { ro.disconnect(); unData.then((f) => f()); unExit.then((f) => f()); term.dispose(); invoke("pty_close", { id }); };
+    return () => { ro.disconnect(); offData(); offExit(); term.dispose(); invoke("pty_close", { id }); };
   }, []);
   return (
     <>

@@ -190,7 +190,7 @@ fn pty_open(app: AppHandle, state: State<Ptys>, id: String, cwd: Option<String>,
                 let _ = app.emit("pty-data", SessionEvent { id: id.clone(), line: data });
             }
         }
-        let _ = app.emit("pty-exit", id);
+        let _ = app.emit("pty-exit", SessionEvent { id, line: String::new() });
     });
     Ok(())
 }
@@ -260,6 +260,27 @@ struct SessionInfo {
     summary: String,
 }
 
+/// First and last `n` bytes of a file as (lossy) strings; the tail starts at the first newline inside the window
+/// so both halves hold only whole lines. Small files: head == whole file, tail == whole file.
+fn head_tail(path: &std::path::Path, n: u64) -> Option<(String, String)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len <= n {
+        let mut s = String::new();
+        f.read_to_string(&mut s).ok()?;
+        return Some((s.clone(), s));
+    }
+    let mut head = vec![0u8; n as usize];
+    f.read_exact(&mut head).ok()?;
+    let head = String::from_utf8_lossy(&head[..head.iter().rposition(|&b| b == b'\n').unwrap_or(0)]).into_owned();
+    f.seek(SeekFrom::Start(len - n)).ok()?;
+    let mut tail = Vec::with_capacity(n as usize);
+    f.read_to_end(&mut tail).ok()?;
+    let start = tail.iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    Some((head, String::from_utf8_lossy(&tail[start..]).into_owned()))
+}
+
 /// Past sessions for `cwd`, newest first. Summary = last recorded prompt.
 #[tauri::command]
 fn list_sessions(cwd: String) -> Vec<SessionInfo> {
@@ -270,8 +291,10 @@ fn list_sessions(cwd: String) -> Vec<SessionInfo> {
         .filter_map(|e| {
             let id = e.path().file_stem()?.to_string_lossy().into_owned();
             let mtime = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            let text = std::fs::read_to_string(e.path()).ok()?;
-            let lines: Vec<serde_json::Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+            // head for "has a real prompt", tail for the summary: transcripts can be tens of MB
+            let (head, tail) = head_tail(&e.path(), 64 * 1024)?;
+            let parse = |t: &str| t.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect::<Vec<_>>();
+            let lines = parse(&head);
             // stubs: sessions that only ran a local slash command (`/clear`, a typo) have no real user prompt
             let has_prompt = lines.iter().any(|v| v["type"] == "user" && v["isMeta"] != true && match &v["message"]["content"] {
                 serde_json::Value::String(s) => !s.starts_with('<'),
@@ -281,7 +304,8 @@ fn list_sessions(cwd: String) -> Vec<SessionInfo> {
             if !has_prompt {
                 return None;
             }
-            let summary = lines
+            let tail_lines = parse(&tail);
+            let summary = tail_lines
                 .iter()
                 .filter_map(|v| v["lastPrompt"].as_str().or_else(|| v["message"]["content"].as_str()).map(|t| t.chars().take(80).collect::<String>()))
                 .last()
@@ -428,6 +452,20 @@ mod tests {
         assert_eq!(utf8_flush_len(&s[..4]), 3); // "가" + first byte of "나" -> hold the tail
         assert_eq!(utf8_flush_len(s), 6);
         assert_eq!(utf8_flush_len(&[0x61, 0xff, 0x62]), 3); // invalid byte -> flush all (lossy)
+    }
+
+    #[test]
+    fn head_tail_keeps_whole_lines() {
+        let path = std::env::temp_dir().join(format!("x-term-ht-{}.jsonl", std::process::id()));
+        let big: String = (0..5000).map(|i| format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "x".repeat(40))).collect();
+        std::fs::write(&path, &big).unwrap();
+        let (h, t) = head_tail(&path, 1024).unwrap();
+        assert!(h.starts_with("{\"n\":0,") && h.ends_with('}') && h.lines().count() > 10, "head is whole lines");
+        assert!(t.starts_with('{') && t.trim_end().ends_with("}") && t.contains("\"n\":4999,"), "tail is whole lines to EOF");
+        std::fs::write(&path, "{\"a\":1}\n").unwrap();
+        let (h, t) = head_tail(&path, 1024).unwrap();
+        assert_eq!(h, t);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

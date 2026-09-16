@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IDockviewPanelProps } from "dockview-react";
 import { invoke } from "@tauri-apps/api/core";
+import { warn } from "./events";
 import { SessionPane, SessionParams } from "./SessionPane";
 import { TermPane } from "./TermPane";
 
@@ -26,7 +27,7 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
   useEffect(() => { const t = setTimeout(() => root.current?.querySelector<HTMLTextAreaElement>(`.slot.${mode} textarea`)?.focus(), 0); return () => clearTimeout(t); }, [mode]);
   // interactive-only slash commands (/plugin, /skills, /status …) are not available in -p mode: run the real CLI in the shell
   const pending = useRef<string | null>(null);
-  const flush = () => { if (pending.current) { invoke("pty_write", { id: api.id, data: pending.current + "\n" }).catch(() => {}); pending.current = null; } };
+  const flush = () => { if (pending.current) { invoke("pty_write", { id: api.id, data: pending.current + "\n" }).catch(warn); pending.current = null; } };
   const runInTerm = (cmd: string) => { pending.current = cmd; if (seen.term) { switchTo("term"); flush(); } else switchTo("term"); };
   const onExit = () => { if (seen.agent) { setSeen((s) => ({ ...s, term: false })); switchTo("agent"); } else api.close(); };
   return (

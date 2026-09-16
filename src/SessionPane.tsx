@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { onEvent, warn } from "./events";
 import { IDockviewPanelProps } from "dockview-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -36,6 +36,14 @@ type Thread = { id: string; ax: number; ay: number; quote: string; resume?: stri
 // Threads belong to a conversation: stored per main session id, swapped in/out together with it.
 const threadsKey = (sid: string) => `x-term.threads.${sid}`;
 const loadThreads = (sid?: string): Thread[] => (sid ? JSON.parse(localStorage.getItem(threadsKey(sid)) ?? "[]") : []);
+const THREAD_INDEX = "x-term.threads.index"; // insertion-ordered session ids; oldest thread sets are dropped past the cap
+const THREAD_CAP = 100;
+function touchThreadIndex(sid: string) {
+  const idx: string[] = JSON.parse(localStorage.getItem(THREAD_INDEX) ?? "[]").filter((x: string) => x !== sid);
+  idx.push(sid);
+  for (const old of idx.splice(0, Math.max(0, idx.length - THREAD_CAP))) localStorage.removeItem(threadsKey(old));
+  localStorage.setItem(THREAD_INDEX, JSON.stringify(idx));
+}
 
 function Pre(props: React.ComponentProps<"pre">) {
   const ref = useRef<HTMLPreElement>(null);
@@ -155,7 +163,7 @@ async function notify(title: string, body: string) {
 
 type ChatProps = {
   id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean;
-  onState?: (s: { cwd?: string; resume?: string; title?: string }) => void; // session id / cwd / title changed
+  onState?: (s: { cwd?: string; resume?: string; title?: string; busy?: boolean }) => void; // session id / cwd / title / turn state changed
   onDone?: (lastText: string) => void; // a turn finished
   onMsgs?: (msgs: Msg[]) => void; // message list changed (threads report up so the parent can merge them)
   onTerminal?: (cmd: string) => void; // run a shell command in the pane's terminal (fallback for interactive-only slash commands)
@@ -173,6 +181,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   queueRef.current = queue;
   const [picks, setPicks] = useState<Record<string, string[]>>({}); // AskUserQuestion answers in progress
   const threadMsgs = useRef<Record<string, Msg[]>>({});
+  const threadBusy = useRef<Record<string, boolean>>({}); // hidden threads stay mounted only while a turn runs
   const [tasks, setTasks] = useState<Record<string, Task>>({}); // TodoWrite / TaskCreate / TaskUpdate checklist
   const [planNote, setPlanNote] = useState(""); // ExitPlanMode "keep planning" feedback
   const addSub = (parent: string, step: SubStep) =>
@@ -201,7 +210,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   useEffect(() => {
     const k = threadKey.current;
     if (compact || !k) return;
-    if (threads.length) localStorage.setItem(threadsKey(k), JSON.stringify(threads)); else localStorage.removeItem(threadsKey(k));
+    if (threads.length) { localStorage.setItem(threadsKey(k), JSON.stringify(threads)); touchThreadIndex(k); } else localStorage.removeItem(threadsKey(k));
   }, [threads]);
   const switchThreads = (sid?: string) => { if (sid !== threadKey.current) { threadKey.current = sid; setThreads(loadThreads(sid)); } };
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
@@ -211,6 +220,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const sessionId = useRef<string | undefined>(resumeProp);
   const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number; ctx: number }>({ model: "", cwd: "", commands: [], cost: 0, ctx: DEFAULT_CTX });
   const streaming = useRef("");
+  const pendingText = useRef("");
+  const raf = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
   const started = msgs.length > 0;
 
@@ -272,8 +283,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
 
   useEffect(() => {
     let alive = true;
-    const unlisten = listen<{ id: string; line: string }>("session-event", ({ payload }) => {
-      if (payload.id !== id || !alive) return;
+    const off = onEvent<{ id: string; line: string }>("session-event", id, (payload) => {
+      if (!alive) return;
       let ev: any;
       try { ev = JSON.parse(payload.line); } catch { return; }
       switch (ev.type) {
@@ -284,7 +295,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             onState?.({ cwd: ev.cwd, resume: ev.session_id });
             info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
             localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
-            if (fork) localStorage.setItem(FORKS, JSON.stringify([...new Set([...JSON.parse(localStorage.getItem(FORKS) ?? "[]"), ev.session_id])]));
+            if (fork) localStorage.setItem(FORKS, JSON.stringify([...new Set([...JSON.parse(localStorage.getItem(FORKS) ?? "[]"), ev.session_id])].slice(-300)));
             refreshStatus();
           }
           break;
@@ -322,8 +333,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           } else if (d.type === "content_block_delta" && d.delta?.type === "text_delta") {
             streaming.current += d.delta.text;
             lastText.current = streaming.current;
-            setActivity("Writing");
-            setAssistant(streaming.current);
+            // batch deltas per frame: one re-render per frame instead of per token
+            pendingText.current = streaming.current;
+            if (!raf.current) raf.current = requestAnimationFrame(() => { raf.current = 0; setActivity("Writing"); setAssistant(pendingText.current); });
           } else if (d.type === "content_block_stop") {
             streaming.current = "";
           }
@@ -389,7 +401,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
             turn.current.done = `${ev.is_error ? "✗" : "✓"} ${fmtSec(ev.duration_ms ?? Date.now() - turn.current.start)} · ${turn.current.tools} tools · ↑${fmtTok(tin)} ↓${fmtTok(u.output_tokens ?? 0)} · $${(ev.total_cost_usd ?? 0).toFixed(3)}`;
           }
           setActivity("");
-          onState?.({ resume: ev.session_id });
+          onState?.({ resume: ev.session_id, busy: false });
           onDone?.(lastText.current);
           info.current.cost += ev.total_cost_usd ?? 0;
           // result.usage sums every API call of the turn, so context comes from the last assistant message (set above);
@@ -413,7 +425,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     });
     invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: mode, model, effort })
       .catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
-    return () => { alive = false; unlisten.then((f) => f()); invoke("stop_session", { id }); };
+    return () => { alive = false; off(); if (raf.current) cancelAnimationFrame(raf.current); invoke("stop_session", { id }).catch(warn); };
   }, [id, gen]);
 
   useEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
@@ -437,13 +449,13 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   }, []);
 
   const control = (request: object) =>
-    invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(), request }) }).catch(() => {});
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(), request }) }).catch(warn);
   const answerPerm = (behavior: "allow" | "deny", always = false, updatedInput = perm?.input) => {
     if (!perm) return;
     const response = behavior === "allow"
       ? { behavior, updatedInput, ...(always && perm.permission_suggestions ? { updatedPermissions: perm.permission_suggestions } : {}) }
       : { behavior, message: "User denied this action" };
-    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(warn);
     setPerm(null);
     setPicks({});
   };
@@ -456,14 +468,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const acceptPlan = (autoEdit: boolean) => {
     if (!perm) return;
     const response = { behavior: "allow", updatedInput: perm.input, ...(autoEdit ? { updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] } : {}) };
-    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(warn);
     setPerm(null);
     if (autoEdit) { setMode("acceptEdits"); localStorage.setItem(MODE_KEY, "acceptEdits"); }
   };
   const keepPlanning = () => {
     if (!perm) return;
     const response = { behavior: "deny", message: planNote.trim() ? `Keep planning. Feedback: ${planNote.trim()}` : "Keep planning; the user wants to refine the plan." };
-    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(() => {});
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: perm.request_id, response } }) }).catch(warn);
     setPerm(null); setPlanNote("");
   };
   const submitAnswers = () => {
@@ -514,6 +526,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
     setMsgs((m) => [...m, { role: "user", text, images }]);
     setBusy(true); setAtBottom(true);
+    onState?.({ busy: true });
     turn.current = { start: Date.now(), tools: 0, done: "" };
     setActivity("Thinking");
     invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
@@ -655,7 +668,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
               <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }}>close</button>
             </span>
           </div>
-          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}><Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact onState={(st) => st.resume && patchThread(t.id, { sid: st.resume })} onMsgs={(m) => { threadMsgs.current[t.id] = m; setTick((x) => x + 1); }} /></div>
+          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}>
+            {(showBody || threadBusy.current[t.id]) && <Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact
+              onState={(st) => { if (st.resume) patchThread(t.id, { sid: st.resume }); if (st.busy !== undefined) threadBusy.current[t.id] = st.busy; }}
+              onMsgs={(m) => { threadMsgs.current[t.id] = m; setTick((x) => x + 1); }} />}
+          </div>
         </div>,
         document.body,
       ))}
