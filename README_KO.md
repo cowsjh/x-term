@@ -1,6 +1,6 @@
 <h1 align="center">x-term</h1>
 
-<p align="center">Claude Code 세션 여러 개를 Linux 창 하나에 나란히 띄웁니다.<br>pane마다 실제 셸과 Claude 채팅이 있고, 큰 작업은 에이전트 여러 개로 나뉘어 각자 git worktree에서 진행됩니다.</p>
+<p align="center">Claude Code 세션 여러 개를 Linux 창 하나에 나란히 띄웁니다.<br>pane마다 실제 셸과 Claude 채팅이 있고, 큰 작업은 백그라운드 에이전트 여러 개로 나뉘어 각자 git worktree에서 진행되며 하단 로그 바에서 추적됩니다.</p>
 
 <p align="center">
   <a href="https://github.com/cowsjh/x-term/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/cowsjh/x-term/actions/workflows/ci.yml/badge.svg"></a>
@@ -22,9 +22,9 @@
 ## 특징
 
 - **pane마다 독립 세션** — 셸(pty)과 Claude Code 세션이 pane 단위로 분리됩니다. 셸에서 `Ctrl+A`를 누르면 그 디렉토리에서 채팅이 열리고, `Ctrl+C`로 돌아옵니다.
-- **에이전트 병렬 실행** — 큰 작업을 요청하면 Claude가 분할을 제안합니다. 승인하면 pane이 여러 개 열리고 각자 git worktree에서 작업합니다. worktree 병합과 삭제는 사이드바에서 합니다.
-- **권한 카드** — 도구 실행 허가를 카드로 표시하고 키보드로 응답합니다. 보고 있지 않은 pane이면 데스크톱 알림이 오고 `Alt+P`로 이동합니다.
-- **채팅 UI** — 마크다운 스트리밍, 수식, diff가 달린 도구 카드, 이미지 붙여넣기, `@파일` 자동완성, 선택한 텍스트로 스레드, git 변경사항 보기, 이전 세션 검색과 이어하기.
+- **백그라운드 에이전트** — 큰 작업을 요청하면 Claude가 분할을 제안합니다. 승인하면 에이전트들이 각자 git worktree에서 자동으로 실행됩니다. 창은 화면에 뜨지 않고, 하단 로그 바가 각 에이전트의 실시간 상태와 활동을 색으로(작업 중 / 권한 / 오류 / 완료) 보여줍니다. 행을 클릭하면 해당 에이전트 창을 열거나 숨깁니다. worktree 병합과 삭제는 사이드바에서 합니다.
+- **권한 카드** — 도구 실행 허가를 카드로 표시하고 키보드로 응답합니다. 보고 있지 않은 pane이면 데스크톱 알림이 오고 `Alt+P`로 이동합니다. (백그라운드 에이전트는 bypass 모드로 실행되어 권한 프롬프트에서 멈추지 않습니다.)
+- **채팅 UI** — 마크다운 스트리밍, 수식, mermaid 다이어그램, diff가 달린 도구 카드, 이미지 붙여넣기, `@파일` 자동완성, 선택한 텍스트로 스레드, git 변경사항 보기, 이전 세션 검색과 이어하기.
 - **실제 터미널** — xterm.js + pty. `claude`, `codex`, `vim` 모두 그대로 실행됩니다.
 - **기존 로그인 사용** — `claude -p` 프로세스를 실행하므로 API 키와 추가 요금이 없습니다.
 
@@ -61,7 +61,7 @@ x-term --fresh             # 저장된 레이아웃 무시
 2. `Alt+[` / `Alt+]`로 오른쪽 / 아래 분할 (`Shift`를 더하면 채팅 pane). 새 pane은 셸의 현재 위치에서 시작합니다.
 3. 채팅에서 `Enter` 전송, `Shift+Enter` 줄바꿈, `/` 명령, `@` 파일, 이미지는 붙여넣기. `Esc` 중단, `Ctrl+C` 세션 종료.
 4. 권한 카드가 뜨면 `Enter` 허용, `Ctrl+Enter` 항상 허용, `Esc` 거부.
-5. 분할 제안 카드에서 Allow — 에이전트 pane들이 열리고 완료되면 부모가 결과를 합칩니다. `Ctrl+Shift+B` 사이드바에 pane, worktree, 이전 세션이 모여 있습니다.
+5. 분할 제안 카드에서 Allow — 에이전트들이 백그라운드에서 실행되고 하단 로그 바에 나타납니다. 행을 클릭해 해당 에이전트 창을 열거나 숨기며, 완료되면 부모가 결과를 합칩니다. `Ctrl+Shift+B` 사이드바에 pane, worktree, 이전 세션이 모여 있습니다.
 
 전체 단축키는 `F1`. 레이아웃, 세션, 창 크기는 다음 실행 시 복원됩니다.
 

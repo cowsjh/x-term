@@ -1,6 +1,6 @@
 <h1 align="center">x-term</h1>
 
-<p align="center">Run several Claude Code sessions side by side, in one Linux window.<br>Each pane is a real shell plus a Claude chat; big tasks fan out into parallel agents, one git worktree each.</p>
+<p align="center">Run several Claude Code sessions side by side, in one Linux window.<br>Each pane is a real shell plus a Claude chat; big tasks fan out into background agents, one git worktree each, tracked in a CLI-style log strip.</p>
 
 <p align="center">
   <a href="https://github.com/cowsjh/x-term/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/cowsjh/x-term/actions/workflows/ci.yml/badge.svg"></a>
@@ -22,9 +22,9 @@
 ## Highlights
 
 - **Split panes, independent sessions** — every pane has its own shell (pty) and its own Claude Code session; `Ctrl+A` in the shell opens the chat there, `Ctrl+C` returns.
-- **Parallel agents** — ask for something big and Claude proposes a split; approve once and sibling panes open, each on its own git worktree. Merge or remove worktrees from the sidebar.
-- **Permission cards** — tool approvals as cards, answered from the keyboard; desktop notification when the pane is not in front, `Alt+P` jumps to it.
-- **Real chat UI** — streaming markdown + KaTeX, tool cards with diffs, image paste, `@file` completion, threads from selected text, git changes view, search and resume past sessions.
+- **Background agents** — ask for something big and Claude proposes a split; approve once and the agents run autonomously, each on its own git worktree. They stay off-screen; a bottom log strip shows each one's live status and activity, colour-coded (working / permission / error / done). Click a row to open or hide that agent's window; merge or remove worktrees from the sidebar.
+- **Permission cards** — tool approvals as cards, answered from the keyboard; desktop notification when the pane is not in front, `Alt+P` jumps to it. (Background agents run in bypass mode, so they never block on a prompt.)
+- **Real chat UI** — streaming markdown + KaTeX + mermaid diagrams, tool cards with diffs, image paste, `@file` completion, threads from selected text, git changes view, search and resume past sessions.
 - **Real terminal** — xterm.js on a pty; run `claude`, `codex`, `vim`, anything.
 - **Uses your login** — Claude runs as a `claude -p` process; no API keys, no extra billing.
 
@@ -61,7 +61,7 @@ x-term --fresh             # ignore the saved layout
 2. `Alt+[` / `Alt+]` split right / below (add `Shift` for a chat pane). New panes inherit the shell's current directory.
 3. In the chat: `Enter` sends, `Shift+Enter` newline, `/` commands, `@` files, paste images. `Esc` interrupts, `Ctrl+C` ends the session.
 4. On a permission card: `Enter` allow, `Ctrl+Enter` always allow, `Esc` deny.
-5. When Claude proposes a parallel split, Allow — agent panes open and the parent integrates their results. `Ctrl+Shift+B` opens the sidebar with panes, worktrees and past sessions.
+5. When Claude proposes a parallel split, Allow — the agents run in the background and appear in the bottom log strip; click a row to open or hide that agent's window, and the parent integrates their results. `Ctrl+Shift+B` opens the sidebar with panes, worktrees and past sessions.
 
 `F1` lists every shortcut. Layout, sessions and window geometry come back on the next start.
 
