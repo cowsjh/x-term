@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { onEvent, warn, busyPanes, agents } from "./events";
+import { onEvent, warn, busyPanes, agents, AgentState } from "./events";
 import { IDockviewPanelProps } from "dockview-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -13,6 +13,7 @@ import { ToolCard, SubStep } from "./ToolCard";
 import { ansiToHtml } from "./ansi";
 import { Menu } from "./Menu";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { cfg, projectConfig } from "./config";
 import { is } from "./keys";
 import { Img, Msg, Hist, modelLabel, fmtTok, fmtSec, toMsgs, expandPastes, IMAGE_EXT } from "./util";
@@ -115,7 +116,7 @@ const Row = memo(function Row({ m, last, acts }: { m: Plain; last: boolean; acts
       )}
       {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} title="click to enlarge" />)}
       {m.role === "err" || m.role === "note" ? m.text
-        : m.role === "thinking" ? (m.text ? <details><summary>thinking</summary>{m.text}</details> : <span>thinking · ~{m.tokens ?? 0} tokens (content not exposed by the CLI for this model)</span>)
+        : m.role === "thinking" ? (m.text ? <details><summary>thinking</summary>{m.text}</details> : <span>thinking · ~{m.tokens ?? 0} tokens</span>)
         : <Markdown {...plugins}>{fold ? m.text.slice(0, LONG) : m.text}</Markdown>}
       {fold && <button className="more" onClick={() => setOpen(true)}>show all ({m.text.length.toLocaleString()} chars)</button>}
     </div>
@@ -140,9 +141,11 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
   const [unread, setUnread] = useState(false);
   const [busy, setBusy] = useState(false);
   const [permPending, setPermPending] = useState(false);
-  useEffect(() => { onStatus(permPending ? "perm" : busy ? "busy" : unread ? "unread" : "idle"); }, [busy, permPending, unread]);
-  useEffect(() => { agents.set(api.id, { busy: false, perm: false, unread: false, last: "", turns: 0, spawnedBy: params.spawnedBy }); return () => { busyPanes.delete(api.id); agents.delete(api.id); }; }, []);
-  const reg = (p: Partial<{ busy: boolean; perm: boolean; unread: boolean; last: string }>) => { const a = agents.get(api.id); if (a) agents.set(api.id, { ...a, ...p }); };
+  const [err, setErr] = useState(false);
+  useEffect(() => { onStatus(err ? "err" : permPending ? "perm" : busy ? "busy" : unread ? "unread" : "idle"); }, [busy, permPending, unread, err]);
+  useEffect(() => { agents.set(api.id, { busy: false, perm: false, unread: false, last: "", turns: 0, spawnedBy: params.spawnedBy, activity: "", err: false }); return () => { busyPanes.delete(api.id); agents.delete(api.id); }; }, []);
+  const reg = (p: Partial<AgentState>) => { const a = agents.get(api.id); if (a) agents.set(api.id, { ...a, ...p }); };
+  const onLive = (p: { activity?: string; err?: boolean }) => { if (p.activity !== undefined) reg({ activity: p.activity }); if (p.err !== undefined) { setErr(p.err); reg({ err: p.err }); } };
   useEffect(() => { reg({ unread }); }, [unread]);
   const onPerm = (p: Perm | null) => { // another pane may be waiting on you: badge + notification
     setPermPending(!!p); reg({ perm: !!p });
@@ -219,7 +222,7 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     <div className={`pane-wrap ${unread ? "unread" : ""}`} onContextMenu={onCtx} onKeyDownCapture={onKeyCapture}>
       {find !== null && <input ref={findRef} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
       {toast && <div className="toast">{toast}</div>}
-      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} prompt={params.prompt} model={params.model} effort={params.effort} title={params.title} onState={onState} onDone={onDone} onTerminal={onTerminal} onEnd={onEnd} onMsgs={(m) => { msgsRef.current = m; }} onPerm={onPerm} />
+      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} prompt={params.prompt} model={params.model} effort={params.effort} title={params.title} spawned={!!params.spawnedBy} onState={onState} onDone={onDone} onLive={onLive} onTerminal={onTerminal} onEnd={onEnd} onMsgs={(m) => { msgsRef.current = m; }} onPerm={onPerm} />
       {changes && (
         <div className="changes">
           <div className="changes-files">
@@ -247,10 +250,11 @@ async function notify(title: string, body: string) {
 }
 
 type ChatProps = {
-  id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean; prompt?: string; title?: string;
+  id: string; cwd?: string; resume?: string; fork?: boolean; quote?: string; compact?: boolean; prompt?: string; title?: string; spawned?: boolean;
   model?: string; effort?: string; // initial model / effort for this pane (spawn_agents picks them from the agent's weight); /model in the pane still overrides it
   onState?: (s: { cwd?: string; resume?: string; title?: string; busy?: boolean; prompt?: string }) => void; // session id / cwd / title / turn state changed
   onDone?: (lastText: string) => void; // a turn finished
+  onLive?: (p: { activity?: string; err?: boolean }) => void; // live status line / error flag for the pane header strip
   onMsgs?: (msgs: Msg[]) => void; // message list changed (threads report up so the parent can merge them)
   onTerminal?: (cmd: string) => void; // run a shell command in the pane's terminal (fallback for interactive-only slash commands)
   onEnd?: () => void; // Ctrl+C while idle: end this session
@@ -258,7 +262,7 @@ type ChatProps = {
 };
 
 /** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
-function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prompt, title, model: modelProp, effort: effortProp, onState, onDone, onMsgs, onTerminal, onEnd, onPerm }: ChatProps) {
+function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prompt, title, spawned, model: modelProp, effort: effortProp, onState, onDone, onLive, onMsgs, onTerminal, onEnd, onPerm }: ChatProps) {
   const promptRef = useRef(prompt); // spawned agent: first message, sent once the process is up
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : localStorage.getItem(DRAFT(id)) ?? "");
@@ -290,6 +294,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const addSub = (parent: string, step: SubStep) =>
     setMsgs((m) => m.map((x) => (x.role === "tool" && x.id === parent ? { ...x, sub: [...(x.sub ?? []), step] } : x)));
   const [activity, setActivity] = useState(""); // CLI-style status line: what is running right now
+  useEffect(() => { onLive?.({ activity }); }, [activity]); // mirror into the pane header strip (spawned agents)
   const [tick, setTick] = useState(0); // 1s re-render while busy for the elapsed counter
   const turn = useRef({ start: 0, tools: 0, done: "" });
   const [cwd, setCwd] = useState(cwdProp ?? "");
@@ -304,7 +309,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
   useEffect(() => { onPerm?.(perm); }, [perm]);
-  const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? cfg.permissionMode);
+  const [mode, setMode] = useState(spawned ? "bypassPermissions" : (localStorage.getItem(MODE_KEY) ?? cfg.permissionMode)); // spawned agents run autonomously: no human at the pane to answer prompts, so never block on can_use_tool
   const [model, setModel] = useState(modelProp || localStorage.getItem("x-term.model") || cfg.model);
   const [effort, setEffort] = useState(effortProp || localStorage.getItem("x-term.effort") || cfg.effort);
   const effortRef = useRef(effort);
@@ -525,6 +530,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             turn.current.done = `${ev.is_error ? "✗" : "✓"} ${fmtSec(ev.duration_ms ?? Date.now() - turn.current.start)} · ${turn.current.tools} tools · ↑${fmtTok(tin)} ↓${fmtTok(u.output_tokens ?? 0)} · $${(ev.total_cost_usd ?? 0).toFixed(3)}`;
           }
           setActivity("");
+          onLive?.({ err: !!ev.is_error });
           // budget / rate limit / API errors arrive only here (result text + errors[]), not as an assistant message
           if (ev.is_error) { const why = [ev.result, ...(ev.errors ?? [])].filter((x) => typeof x === "string" && x && x !== lastText.current).join("\n"); if (why) setMsgs((m) => [...m, { role: "err", text: why }]); }
           onState?.({ resume: ev.session_id, busy: false });
@@ -557,7 +563,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         const pc = await projectConfig(cwd);
         if (!modelProp && pc.model && pc.model !== cfg.model) { m = pc.model; setModel(m); }
         if (!effortProp && pc.effort && pc.effort !== cfg.effort) { ef = pc.effort; setEffort(ef); }
-        if (pc.permissionMode && pc.permissionMode !== cfg.permissionMode) { pm = pc.permissionMode; setMode(pm); } // project intent wins over the last-used mode (not persisted)
+        if (!spawned && pc.permissionMode && pc.permissionMode !== cfg.permissionMode) { pm = pc.permissionMode; setMode(pm); } // project intent wins over the last-used mode (not persisted); spawned agents stay autonomous
         runCmd.current = pc.runCommand && pc.runCommand !== cfg.runCommand ? pc.runCommand : "";
       }
       if (!alive) return;
@@ -693,6 +699,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     setMsgs((m) => [...m, { role: "user", text, images, ts: Date.now() }]);
     setBusy(true); setAtBottom(true);
     onState?.({ busy: true });
+    onLive?.({ err: false }); // new turn clears any prior error state
     turn.current = { start: Date.now(), tools: 0, done: "" };
     setActivity("Thinking");
     invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
@@ -858,7 +865,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       else if (is(e, "run")) { // a project's .x-term.json is untrusted content: show its command and ask before it touches the shell
         stop(); const cmd = runCmd.current || cfg.runCommand;
         if (!cmd || !onTerminal) setMsgs((m) => [...m, { role: "note", text: "no runCommand in config.json / .x-term.json" }]);
-        else if (!runCmd.current || confirm(`Run this project's command in the shell?\n\n${cmd}`)) onTerminal(cmd);
+        else if (!runCmd.current) onTerminal(cmd);
+        else confirm(`Run this project's command in the shell?\n\n${cmd}`).then((ok) => { if (ok) onTerminal(cmd); });
       }
     }}>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll} onClick={(e) => { const t = e.target as HTMLElement; if (t.tagName === "IMG") setLightbox((t as HTMLImageElement).src); }}>

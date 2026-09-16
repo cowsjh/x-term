@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, themeDark, themeLight } from "dockview-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { SessionParams } from "./SessionPane";
 import { Pane, PaneParams } from "./Pane";
 import { cfg, applyConfig, toggleTheme, Config } from "./config";
@@ -42,14 +43,14 @@ const zoom = () => Number(localStorage.getItem(ZOOM_KEY)) || 1;
 const LAYOUT_KEY = "x-term.layout"; // dockview layout incl. per-pane params (cwd, session id, title) -> restored on launch
 
 /** `term` = shell in a pty (default pane), `session` = claude stream-json chat. Alt+[ / Alt+] split into a terminal, Alt+Shift+[ / ] into a chat. */
-export function openPane(api: DockviewApi, component: "term" | "session", params: PaneParams, referencePanel?: string, direction: "right" | "below" = "right") {
+export function openPane(api: DockviewApi, component: "term" | "session", params: PaneParams, referencePanel?: string, direction: "right" | "below" = "right", floating?: { x: number; y: number; width: number; height: number }) {
   const id = crypto.randomUUID();
   api.addPanel({
     id,
     component,
     title: (params as SessionParams).title ?? `${component === "term" ? "sh" : "claude"} ${++counter}`,
     params,
-    position: referencePanel ? { referencePanel, direction } : undefined,
+    ...(floating ? { floating } : { position: referencePanel ? { referencePanel, direction } : undefined }),
   });
   return id;
 }
@@ -70,17 +71,20 @@ async function handleMcp(api: DockviewApi, { id, pane, name, arguments: a }: Mcp
     switch (name) {
       case "spawn_agents": {
         if (!parent) throw new Error("spawn_agents works only from a main pane");
+        if ((parent.params as PaneParams | undefined)?.spawnedBy) throw new Error("a spawned agent cannot spawn more agents"); // structural guard: no nested spawning, so the prompt needs no "do not spawn" note
         const list: any[] = a.agents ?? [];
         if (list.length > MAX_AGENTS) throw new Error(`at most ${MAX_AGENTS} agents per call, got ${list.length}`);
         const out: { id: string; title: string; cwd: string; model: string; weight: string }[] = [];
-        let ref = pane;
+        // spawned agents run autonomously (auto mode) in hidden floating panes; the bottom AgentBar is the UI
+        const halfW = Math.floor((document.querySelector(".dock")?.clientWidth ?? window.innerWidth) / 2);
+        let i = 0;
         for (const ag of list) {
           const cwd = ag.worktree ? await invoke<string>("git_worktree", { cwd: pcwd, name: ag.worktree }) : pcwd ?? "";
-          const prompt = `[Spawned by another x-term pane. Do not spawn agents yourself. When done, end with a final summary of what you changed and anything left open.]\n\n${ag.prompt}`;
+          const prompt = `${ag.prompt}\n\n(When done, end with a short summary of what changed.)`;
           const { weight, model, effort } = pickAgentModel(ag, cfg.agentModels);
-          const nid = openPane(api, "session", { cwd, title: ag.title, mode: "agent", prompt, spawnedBy: pane, model, effort }, ref, ref === pane ? "right" : "below");
+          const off = i++ * 30; // cascade so stacked windows stay grabbable
+          const nid = openPane(api, "session", { cwd, title: ag.title, mode: "agent", prompt, spawnedBy: pane, model, effort }, undefined, "right", { x: 60 + off, y: 60 + off, width: halfW, height: 440 });
           out.push({ id: nid, title: ag.title, cwd, model, weight });
-          ref = nid;
         }
         parent.api.setActive();
         return reply({ agents: out });
@@ -112,6 +116,41 @@ const components = {
   session: (props: IDockviewPanelProps<PaneParams>) => <Pane {...props} initial="agent" />,
   term: (props: IDockviewPanelProps<PaneParams>) => <Pane {...props} initial="term" />,
 };
+
+/** CLI-style footer: one row per spawned agent with live status colour + activity line. Click focuses its window (brings the floating pane to front); ✕ closes it. */
+function AgentBar({ apiRef }: { apiRef: React.RefObject<DockviewApi | null> }) {
+  const [rows, setRows] = useState<{ id: string; title: string; cls: string; log: string }[]>([]);
+  const [open, setOpen] = useState<Set<string>>(new Set()); // ids whose floating window is revealed
+  useEffect(() => {
+    const t = setInterval(() => setRows([...agents.entries()].filter(([, a]) => a.spawnedBy).map(([id, a]) => ({
+      id,
+      title: apiRef.current?.getPanel(id)?.title ?? id.slice(0, 6),
+      cls: a.err ? "err" : a.perm ? "perm" : a.busy ? "busy" : a.unread ? "unread" : "idle",
+      log: a.busy ? a.activity : a.last?.split("\n")[0] ?? "",
+    }))), 500);
+    return () => clearInterval(t);
+  }, []);
+  const toggle = (id: string) => setOpen((s) => {
+    const n = new Set(s); const show = !n.has(id); show ? n.add(id) : n.delete(id);
+    document.querySelector<HTMLElement>(`.pane-root[data-id="${id}"]`)?.classList.toggle("open", show);
+    if (show) apiRef.current?.getPanel(id)?.api.setActive();
+    return n;
+  });
+  if (!rows.length) return null;
+  return (
+    <div className="agent-bar">
+      {rows.map((r) => (
+        <div key={r.id} className={`agent-row ${r.cls} ${open.has(r.id) ? "shown" : ""}`} title={open.has(r.id) ? "click to hide window" : "click to open window"} onClick={() => toggle(r.id)}>
+          <span className="dot" />
+          <span className="t">↑ {r.title}</span>
+          <span className="log">{r.log || "idle"}</span>
+          <span className="eye">{open.has(r.id) ? "◱" : "▭"}</span>
+          <button title="terminate agent" onClick={(e) => { e.stopPropagation(); apiRef.current?.getPanel(r.id)?.api.close(); }}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** Help overlay rows; combos come from src/keys.ts (and the user's `keys` overrides), so build them when the overlay opens. */
 const shortcuts = (): [string, string][] => [
@@ -200,9 +239,12 @@ export default function App() {
     const args = await invoke<string[]>("cli_args").catch(() => [] as string[]);
     const saved = cfg.restoreLayout && !args.includes("--fresh") ? localStorage.getItem(LAYOUT_KEY) : null;
     try { if (saved) e.api.fromJSON(JSON.parse(saved)); } catch { localStorage.removeItem(LAYOUT_KEY); }
-    if (!e.api.panels.length) openPane(e.api, "term", {});
-    e.api.onDidLayoutChange(() => localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON())));
+    // spawned floating panes reference claude processes that died with the last run: drop them so a restart never restores a stuck/empty window
+    for (const p of [...e.api.panels]) if ((p.params as PaneParams | undefined)?.spawnedBy) p.api.close();
+    // no group in the grid = a broken/empty restore (e.g. orphan panels with no layout): reset to a fresh pane instead of a dead window
+    if (!e.api.groups.length) { localStorage.removeItem(LAYOUT_KEY); openPane(e.api, "term", {}); }
     e.api.onDidRemovePanel((p) => localStorage.removeItem(`x-term.draft.${p.id}`)); // a closed pane's composer draft is unreachable: drop it
+    e.api.onDidLayoutChange(() => localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON())));
   };
   const helpRef = useRef(false);
   helpRef.current = help;
@@ -284,8 +326,11 @@ export default function App() {
     const unmcp = listen<McpReq>("mcp-request", (e) => { const api = apiRef.current; if (api) handleMcp(api, e.payload); else invoke("mcp_reply", { id: e.payload.id, result: null, error: "x-term not ready" }); });
     const uncfg = listen<Partial<Config>>("config-changed", (e) => { applyConfig(e.payload); say("config reloaded"); });
     const unclose = getCurrentWindow().onCloseRequested(async (e) => {
-      if (cfg.confirmQuit && busyPanes.size && !confirm(`${busyPanes.size} session(s) still working. Quit anyway?`)) { e.preventDefault(); return; }
+      // the async dialog can't gate the synchronous close event, so we always take over the close and finish it ourselves
+      e.preventDefault();
+      if (cfg.confirmQuit && busyPanes.size && !(await confirm(`${busyPanes.size} session(s) still working. Quit anyway?`))) return;
       await saveWindow();
+      await getCurrentWindow().destroy();
     });
     restoreWindow();
     if (zoom() !== 1) getCurrentWebview().setZoom(zoom()).catch(console.warn);
@@ -303,12 +348,12 @@ export default function App() {
   const stateOf = (id: string) => { const a = agents.get(id); return !a ? "sh" : a.perm ? "⚠ permission" : a.busy ? "⏳ working" : a.unread ? "● done" : "idle"; };
   const mergeWt = async (w: Worktree) => {
     if (!w.branch) return say("detached worktree: nothing to merge");
-    if (!confirm(`git merge ${w.branch} into the main checkout?`)) return;
+    if (!(await confirm(`git merge ${w.branch} into the main checkout?`))) return;
     await invoke<string>("git_worktree_merge", { cwd: wts.cwd, branch: w.branch }).then((out) => say(out.trim().split("\n").pop() || "merged")).catch((e) => say(String(e)));
     loadWts();
   };
   const removeWt = async (w: Worktree) => {
-    if (!confirm(`Remove worktree ${w.path}${w.branch ? ` and delete branch ${w.branch}` : ""}? (fails if it has uncommitted changes)`)) return;
+    if (!(await confirm(`Remove worktree ${w.path}${w.branch ? ` and delete branch ${w.branch}` : ""}? (fails if it has uncommitted changes)`))) return;
     await invoke("git_worktree_remove", { cwd: wts.cwd, path: w.path, deleteBranch: !!w.branch }).then(() => say("worktree removed")).catch((e) => say(String(e)));
     loadWts();
   };
@@ -361,6 +406,7 @@ export default function App() {
           <DockviewReact theme={theme === "light" ? themeLight : themeDark} components={components} onReady={onReady} />
         </div>
       </div>
+      <AgentBar apiRef={apiRef} />
       {toast && <div className="toast app-toast">{toast}</div>}
       {keysDlg && <KeysDialog onClose={() => setKeysDlg(false)} />}
       {help && (

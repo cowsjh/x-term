@@ -19,5 +19,5 @@ export { warn };
 export const busyPanes = new Set<string>();
 /** Per chat pane, for the orchestration tools (agent_status / wait_agents) and the Alt+P / Alt+U jumps and the parent's
  *  children summary: turn state, permission wait, unread, last answer, turns finished, who spawned it. */
-export type AgentState = { busy: boolean; perm: boolean; unread: boolean; last: string; turns: number; spawnedBy?: string };
+export type AgentState = { busy: boolean; perm: boolean; unread: boolean; last: string; turns: number; spawnedBy?: string; activity: string; err: boolean };
 export const agents = new Map<string, AgentState>();

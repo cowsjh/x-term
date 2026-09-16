@@ -6,8 +6,8 @@ import { SessionPane, SessionParams } from "./SessionPane";
 import { TermPane } from "./TermPane";
 
 export type Mode = "term" | "agent";
-export type PaneStatus = "idle" | "busy" | "perm" | "unread";
-const STATUS_LABEL: Record<PaneStatus, string> = { idle: "claude", busy: "⏳ working", perm: "⚠ permission", unread: "● done" };
+export type PaneStatus = "idle" | "busy" | "perm" | "unread" | "err";
+const STATUS_LABEL: Record<PaneStatus, string> = { idle: "claude", busy: "⏳ working", perm: "⚠ permission", unread: "● done", err: "✗ error" };
 export type PaneParams = SessionParams & { mode?: Mode };
 const LAYOUT_KEY = "x-term.layout";
 
@@ -28,6 +28,7 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
   const [editing, setEditing] = useState<string | null>(null); // F2: inline title editor
   const [n, setN] = useState(0); // 1-based position in the layout: Alt+N jumps here
   const [kids, setKids] = useState(""); // spawned children summary, e.g. "2 working · 1 done"
+  const [termGen, setTermGen] = useState(0); // bump to remount the shell (respawn pty) when the last terminal exits
   const saveLayout = () => localStorage.setItem(LAYOUT_KEY, JSON.stringify(containerApi.toJSON()));
   useEffect(() => {
     const d1 = api.onDidTitleChange(({ title }) => setTitle(title));
@@ -74,7 +75,9 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
     api.updateParameters({ mode: "term", resume: undefined, title: undefined, fork: undefined, quote: undefined });
     saveLayout();
   };
-  const onExit = () => { if (seen.agent) { setSeen((s) => ({ ...s, term: false })); switchTo("agent"); } else api.close(); };
+  const lastPane = () => containerApi.panels.length <= 1;
+  // shell ended: switch to a waiting chat if any, else close — but the last remaining terminal is the app's base, so respawn it instead of leaving an empty window
+  const onExit = () => { if (seen.agent) { setSeen((s) => ({ ...s, term: false })); switchTo("agent"); } else if (lastPane()) setTermGen((g) => g + 1); else api.close(); };
   const commitTitle = () => {
     const t = (editing ?? "").trim().slice(0, 40);
     setEditing(null);
@@ -92,7 +95,7 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
         <span className="cwd">{cwdTail}</span>
         <span className="st">{mode === "term" ? "sh" : STATUS_LABEL[status]}</span>
       </div>
-      {seen.term && <div className={`slot term ${mode === "term" ? "" : "hidden"}`}><TermPane id={api.id} cwd={params.cwd} onSwitch={() => switchTo("agent")} onExit={onExit} onReady={flush} onTitle={(t) => { if (mode === "term" && !params.title) api.setTitle(t); }} onClose={() => api.close()} /></div>}
+      {seen.term && <div className={`slot term ${mode === "term" ? "" : "hidden"}`}><TermPane key={termGen} id={api.id} cwd={params.cwd} onSwitch={() => switchTo("agent")} onExit={onExit} onReady={flush} onTitle={(t) => { if (mode === "term" && !params.title) api.setTitle(t); }} onClose={() => { if (!lastPane()) api.close(); }} /></div>}
       {seen.agent && <div className={`slot agent ${mode === "agent" ? "" : "hidden"}`}><SessionPane {...props} params={{ ...params, cwd: agentCwd }} onSwitch={() => switchTo("term")} onEnd={endAgent} onTerminal={runInTerm} onStatus={setStatus} /></div>}
     </div>
   );

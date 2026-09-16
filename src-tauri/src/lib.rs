@@ -960,6 +960,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Sessions::default())
         .manage(Ptys::default())
         .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, save_export, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files, load_config, config_path, open_config, save_config_patch, cli_args, read_image, search_sessions, list_all_sessions, git_status, git_diff, git_worktree, git_worktree_list, git_worktree_merge, git_worktree_remove, open_in_editor, mcp::mcp_reply, log])

@@ -17,6 +17,7 @@ html, body, #root { height: 100%; margin: 0; background: var(--bg); color: var(-
 .msg img, .thumbs img { max-height: 160px; margin: 4px; border-radius: 4px; }
 .composer { border-top: 1px solid var(--border2); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
 .composer textarea { width: 100%; box-sizing: border-box; min-height: 60px; max-height: 40vh; overflow-y: auto; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; resize: vertical; font: inherit; }
+.composer textarea::placeholder { color: var(--dim); opacity: 0.35; }
 .thumbs { display: flex; flex-wrap: wrap; }
 .ask-btn { position: fixed; z-index: 10; background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
 .status { display: flex; align-items: flex-end; gap: 8px; font: 12px ui-monospace, monospace; white-space: pre; overflow-x: auto; }
@@ -37,6 +38,24 @@ html, body, #root { height: 100%; margin: 0; background: var(--bg); color: var(-
 .pane-root { height: 100%; display: flex; flex-direction: column; }
 .slot { flex: 1; min-height: 0; }
 .slot.hidden { display: none; }
+.pane-root[data-spawned] .pane-hdr { display: none; } /* spawned floating windows use dockview's native titlebar (draggable); no second in-pane bar */
+/* spawned agents run in floating panes but are hidden by default (the bottom AgentBar is the UI); clicking a row toggles .open to reveal that one window */
+.dv-resize-container:has(.pane-root[data-spawned]) { visibility: hidden; pointer-events: none; }
+.dv-resize-container:has(.pane-root[data-spawned].open) { visibility: visible; pointer-events: auto; }
+/* bottom agent log strip: CLI-style overview of spawned agents */
+.agent-bar { display: flex; gap: 1px; align-items: stretch; background: var(--bg0); border-top: 1px solid var(--border2); font: 11px var(--mono); max-height: 96px; overflow-y: auto; flex-wrap: wrap; }
+.agent-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; cursor: pointer; background: rgb(50, 42, 70); color: rgb(200, 178, 255); flex: 1 1 240px; min-width: 0; }
+.agent-row:hover { filter: brightness(1.2); }
+.agent-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: currentColor; }
+.agent-row .t { flex: 0 1 auto; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-row .log { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+.agent-row .eye { flex: none; opacity: .6; }
+.agent-row.shown { outline: 1px solid currentColor; outline-offset: -1px; } .agent-row.shown .eye { opacity: 1; }
+.agent-row.busy { color: rgb(200, 178, 255); }
+.agent-row.perm { background: rgb(74, 52, 20); color: rgb(255, 190, 100); } .agent-row.perm .log { color: rgb(255, 190, 100); }
+.agent-row.err { background: rgb(70, 26, 26); color: rgb(255, 150, 150); } .agent-row.err .log { color: rgb(255, 150, 150); }
+.agent-row.unread { background: rgb(20, 58, 30); color: rgb(130, 226, 150); } .agent-row.unread .log { color: rgb(130, 226, 150); }
+.agent-row button { background: none; border: none; color: inherit; cursor: pointer; padding: 0 2px; opacity: .7; } .agent-row button:hover { opacity: 1; }
 .menu { position: fixed; z-index: 2000; list-style: none; margin: 0; padding: 4px 0; min-width: 160px; background: var(--bg4); border: 1px solid var(--border); border-radius: 4px; box-shadow: 0 4px 16px #000c; font: 13px system-ui, sans-serif; color: var(--fg); }
 .menu li { display: flex; justify-content: space-between; padding: 3px 10px; cursor: pointer; }
 .menu li:hover { background: var(--accent); }
@@ -154,6 +173,13 @@ code.inline.copied { background: #2a5a2a; }
 .pane-root[data-spawned] { --bg: rgb(36, 33, 46); --bg0: rgb(50, 42, 70); --bg2: rgb(46, 42, 60); --bg3: rgb(24, 22, 32); }
 .pane-root[data-spawned] .pane-hdr .n { color: rgb(190, 160, 255); }
 [data-theme=light] .pane-root[data-spawned] { --bg: rgb(246, 242, 252); --bg0: rgb(228, 218, 246); --bg2: rgb(238, 232, 250); --bg3: rgb(252, 250, 255); }
+/* spawned header strip: live log line + status colors (sub=violet base, perm=orange, err=red, done=green) */
+.pane-root[data-spawned] .pane-hdr .t { flex: 0 1 auto; max-width: 34%; }
+.pane-hdr .log { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+.pane-root[data-spawned] .pane-hdr.busy .log { color: rgb(200, 178, 255); }
+.pane-root[data-spawned] .pane-hdr.perm { background: rgb(74, 52, 20); color: rgb(240, 180, 90); } .pane-root[data-spawned] .pane-hdr.perm .log, .pane-root[data-spawned] .pane-hdr.perm .st { color: rgb(255, 190, 100); }
+.pane-root[data-spawned] .pane-hdr.err { background: rgb(70, 26, 26); } .pane-root[data-spawned] .pane-hdr.err .log, .pane-root[data-spawned] .pane-hdr.err .st { color: rgb(255, 150, 150); font-weight: bold; }
+.pane-root[data-spawned] .pane-hdr.unread { background: rgb(20, 58, 30); } .pane-root[data-spawned] .pane-hdr.unread .log, .pane-root[data-spawned] .pane-hdr.unread .st { color: rgb(130, 226, 150); }
 /* config.json fontFamily / fontSize: terminal, code, tool cards, status line share the mono font */
 :root { --mono: ui-monospace, monospace; --mono-size: 13px; }
 .msg code, .msg.tool, .tool-res, .tool-in, .diff pre, .changes, .status, .activity, .slash, .findbar, .toast { font-family: var(--mono); }
