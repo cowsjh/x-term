@@ -1,4 +1,4 @@
-[English](README_EN.md)
+[English](README.md)
 
 # x-term
 
