@@ -44,7 +44,11 @@ const Meter = ({ label, pct }: { label: string; pct?: number }) => (
 type Status = { model: string; cwd: string; ctx?: number; sess?: number; reset?: string; plan: string; exited?: boolean };
 const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
-type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; open: boolean };
+/** `resume` = main session it forked from, `sid` = the thread's own (forked) session once known -> restored with --resume, no re-fork. */
+type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; sid?: string; open: boolean };
+// Threads belong to a conversation: stored per main session id, swapped in/out together with it.
+const threadsKey = (sid: string) => `x-term.threads.${sid}`;
+const loadThreads = (sid?: string): Thread[] => (sid ? JSON.parse(localStorage.getItem(threadsKey(sid)) ?? "[]") : []);
 
 function Pre(props: React.ComponentProps<"pre">) {
   const ref = useRef<HTMLPreElement>(null);
@@ -81,7 +85,7 @@ const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 
-export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
+export function SessionPane({ api, containerApi, params, onSwitch }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void }) {
   const [unread, setUnread] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // right-click anywhere in the chat -> pane menu (inputs and thread windows keep the native menu)
@@ -91,6 +95,12 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     setMenu({ x: e.clientX, y: e.clientY });
   };
   const sel = () => window.getSelection()?.toString() ?? "";
+  // Ctrl+C with nothing selected -> back to the shell (with a selection it stays the copy shortcut)
+  const onKey = (e: React.KeyboardEvent) => {
+    const t = e.target as HTMLTextAreaElement;
+    const has = (t.selectionStart != null && t.selectionStart !== t.selectionEnd) || !!sel();
+    if (e.ctrlKey && !e.shiftKey && e.key === "c" && !has) { e.preventDefault(); onSwitch(); }
+  };
   useEffect(() => {
     const d = api.onDidActiveChange(({ isActive }) => { if (isActive) setUnread(false); });
     return () => d.dispose();
@@ -108,9 +118,9 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
     notify(params.title ?? api.title ?? "x-term", text.slice(0, 120));
   };
   return (
-    <div className="pane-wrap" onContextMenu={onCtx}>
+    <div className="pane-wrap" onContextMenu={onCtx} onKeyDown={onKey}>
       <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} />
-      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Close", key: "c", run: () => api.close() }]} />}
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
 }
@@ -152,7 +162,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [mode, setMode] = useState(localStorage.getItem(MODE_KEY) ?? "acceptEdits");
   const [model, setModel] = useState(localStorage.getItem("x-term.model") || "claude-opus-5[1m]");
   const [effort, setEffort] = useState(localStorage.getItem("x-term.effort") || "high");
-  const [threads, setThreads] = useState<Thread[]>([]);
+  const [threads, setThreads] = useState<Thread[]>(() => (compact ? [] : loadThreads(resumeProp)));
+  const threadKey = useRef(resumeProp); // main session the current threads belong to
+  useEffect(() => {
+    const k = threadKey.current;
+    if (compact || !k) return;
+    if (threads.length) localStorage.setItem(threadsKey(k), JSON.stringify(threads)); else localStorage.removeItem(threadsKey(k));
+  }, [threads]);
+  const switchThreads = (sid?: string) => { if (sid !== threadKey.current) { threadKey.current = sid; setThreads(loadThreads(sid)); } };
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
   const lastText = useRef("");
@@ -216,6 +233,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         case "system":
           if (ev.subtype === "init") {
             sessionId.current = ev.session_id;
+            switchThreads(ev.session_id);
             onState?.({ cwd: ev.cwd, resume: ev.session_id });
             info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
             localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
@@ -225,6 +243,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           break;
         case "conversation_reset": // `/clear`: CLI starts a fresh session in the same process
           setMsgs([]);
+          switchThreads(undefined); // new conversation, new thread set (the next init names it)
           info.current.cost = 0;
           info.current.usage = undefined;
           break;
@@ -359,6 +378,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const resume = async (sess: SessionInfo) => {
     setSessions(null);
     sessionId.current = sess.id;
+    switchThreads(sess.id);
     const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
     setMsgs(toMsgs(hist));
     onState?.({ resume: sess.id, title: sess.summary.slice(0, 30) });
@@ -495,7 +515,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
               <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }}>close</button>
             </span>
           </div>
-          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}><Chat id={t.id} cwd={cwd} resume={t.resume} fork quote={t.quote} compact /></div>
+          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}><Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact onState={(st) => st.resume && patchThread(t.id, { sid: st.resume })} /></div>
         </div>,
         document.body,
       ))}
