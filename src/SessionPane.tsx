@@ -88,7 +88,7 @@ const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 
-export function SessionPane({ api, containerApi, params, onSwitch }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void }) {
+export function SessionPane({ api, containerApi, params, onSwitch, onTerminal }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void; onTerminal: (cmd: string) => void }) {
   const [unread, setUnread] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // right-click anywhere in the chat -> pane menu (inputs and thread windows keep the native menu)
@@ -122,7 +122,7 @@ export function SessionPane({ api, containerApi, params, onSwitch }: IDockviewPa
   };
   return (
     <div className="pane-wrap" onContextMenu={onCtx} onKeyDown={onKey}>
-      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} />
+      <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} />
       {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
@@ -139,10 +139,11 @@ type ChatProps = {
   onState?: (s: { cwd?: string; resume?: string; title?: string }) => void; // session id / cwd / title changed
   onDone?: (lastText: string) => void; // a turn finished
   onMsgs?: (msgs: Msg[]) => void; // message list changed (threads report up so the parent can merge them)
+  onTerminal?: (cmd: string) => void; // run a shell command in the pane's terminal (fallback for interactive-only slash commands)
 };
 
 /** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
-function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone, onMsgs }: ChatProps) {
+function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone, onMsgs, onTerminal }: ChatProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
   const [images, setImages] = useState<Img[]>([]);
@@ -186,6 +187,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
   const lastText = useRef("");
+  const lastCmd = useRef(""); // last slash command sent; re-run in the terminal if the CLI says it is interactive-only
   const sessionId = useRef<string | undefined>(resumeProp);
   const info = useRef<{ model: string; cwd: string; commands: string[]; rate?: any; usage?: any; cost: number; ctx: number }>({ model: "", cwd: "", commands: [], cost: 0, ctx: DEFAULT_CTX });
   const streaming = useRef("");
@@ -316,6 +318,13 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
                 ? m.map((x) => (x.role === "tool" && x.id === b.id ? { ...x, input: b.input } : x))
                 : [...m, { role: "tool", id: b.id, name: b.name, input: b.input, text: b.name }]);
             // slash commands (e.g. /context) come back as a full text block without deltas
+            if (b.type === "text" && ev.message?.model === "<synthetic>" && /isn't available in this environment/.test(b.text) && lastCmd.current && onTerminal) {
+              const cmd = lastCmd.current;
+              lastCmd.current = "";
+              setAssistant(`\`${cmd}\` is interactive-only. Running it in the terminal (Ctrl+A to come back).`);
+              onTerminal(`(cd '${cwd.replace(/'/g, "'\\''")}' && claude '${cmd.replace(/'/g, "'\\''")}')`);
+              continue;
+            }
             if (b.type === "text" && !streaming.current) setAssistant(b.text);
           }
           break;
@@ -458,6 +467,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     if (/^\/resume\b/.test(text)) { // CLI's /resume is an interactive picker; unavailable in -p mode
       setInput(""); setSlash([]);
       const forks = new Set<string>(JSON.parse(localStorage.getItem(FORKS) ?? "[]"));
+      setSlashIdx(0);
       setSessions((await invoke<SessionInfo[]>("list_sessions", { cwd })).filter((s) => !forks.has(s.id)));
       return;
     }
@@ -469,6 +479,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   /** Send now, or park in the queue while a turn is running (drained one per `result`). */
   const post = (text: string, images: Img[], force = false) => {
     if (busy && !force) { setQueue((q) => [...q, { text, images }]); return; }
+    lastCmd.current = text.startsWith("/") ? text : "";
     if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
     setMsgs((m) => [...m, { role: "user", text, images }]);
     setBusy(true); setAtBottom(true);
@@ -498,6 +509,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   };
   const pickFile = (path: string) => { setInput((v) => v.replace(/@[^\s@]*$/, `@${path} `)); setFiles([]); taRef.current?.focus(); };
   const onKey = (e: React.KeyboardEvent) => {
+    if (sessions) { // /resume picker
+      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx((i) => (i + 1) % Math.max(1, sessions.length)); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx((i) => (i - 1 + sessions.length) % Math.max(1, sessions.length)); return; }
+      if (e.key === "Enter") { e.preventDefault(); if (sessions[slashIdx]) resume(sessions[slashIdx]); return; }
+      if (e.key === "Escape") { e.preventDefault(); setSessions(null); return; }
+    }
     const list = slash.length ? slash : files;
     if (list.length) {
       if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx((i) => (i + 1) % list.length); return; }
@@ -654,7 +671,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {sessions && (
           <ul className="slash">
             {sessions.length === 0 && <li>no sessions for {cwd}</li>}
-            {sessions.map((s) => <li key={s.id} onMouseDown={() => resume(s)}>{new Date(s.mtime * 1000).toLocaleString()} · {s.id.slice(0, 8)} · {s.summary}</li>)}
+            {sessions.map((s, i) => <li key={s.id} className={i === slashIdx ? "sel" : ""} onMouseDown={() => resume(s)}>{new Date(s.mtime * 1000).toLocaleString()} · {s.id.slice(0, 8)} · {s.summary}</li>)}
             <li onMouseDown={() => setSessions(null)}>✕ cancel</li>
           </ul>
         )}

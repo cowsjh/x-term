@@ -9,11 +9,11 @@ import { Menu } from "./Menu";
 const APP_KEYS = new Set(["BracketLeft", "BracketRight", "KeyW"]); // Alt+[ Alt+] Alt+W belong to the app, not the shell
 
 /** A real shell in a pty (xterm.js). Run `claude`, `codex`, anything. Ctrl+A / right-click -> agent mode; `onExit` when the shell ends. */
-export function TermPane({ id, cwd, onSwitch, onExit }: { id: string; cwd?: string; onSwitch: () => void; onExit: () => void }) {
+export function TermPane({ id, cwd, onSwitch, onExit, onReady }: { id: string; cwd?: string; onSwitch: () => void; onExit: () => void; onReady?: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const cb = useRef({ onSwitch, onExit });
-  cb.current = { onSwitch, onExit };
+  const cb = useRef({ onSwitch, onExit, onReady });
+  cb.current = { onSwitch, onExit, onReady };
   useEffect(() => {
     const term = new Terminal({ fontFamily: "ui-monospace, monospace", fontSize: 13, scrollback: 5000, theme: { background: "#1e1e1e" } });
     const fit = new FitAddon();
@@ -28,7 +28,7 @@ export function TermPane({ id, cwd, onSwitch, onExit }: { id: string; cwd?: stri
     });
     const unData = listen<{ id: string; line: string }>("pty-data", ({ payload }) => { if (payload.id === id) term.write(payload.line); });
     const unExit = listen<string>("pty-exit", ({ payload }) => { if (payload === id) cb.current.onExit(); });
-    invoke("pty_open", { id, cwd: cwd ?? null, cols: term.cols, rows: term.rows }).catch((e) => term.write(`\r\n${e}\r\n`));
+    invoke("pty_open", { id, cwd: cwd ?? null, cols: term.cols, rows: term.rows }).then(() => setTimeout(() => cb.current.onReady?.(), 300)).catch((e) => term.write(`\r\n${e}\r\n`));
     term.onData((data) => invoke("pty_write", { id, data }).catch(() => {}));
     term.onResize(({ cols, rows }) => invoke("pty_resize", { id, cols, rows }).catch(() => {}));
     const ro = new ResizeObserver(() => { if (ref.current?.offsetHeight) fit.fit(); }); // also refits when the slot becomes visible again
