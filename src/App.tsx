@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DockviewReact, DockviewApi, DockviewReadyEvent, IDockviewPanelProps, themeDark } from "dockview-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -25,8 +25,30 @@ const components = {
   term: (props: IDockviewPanelProps<PaneParams>) => <Pane {...props} initial="term" />,
 };
 
+const SHORTCUTS: [string, string][] = [
+  ["Alt+[ / Alt+]", "split: new terminal right / below"],
+  ["Alt+Shift+[ / ]", "split: new claude chat right / below"],
+  ["Alt+W", "close pane"],
+  ["Ctrl+A (shell)", "agent mode in the shell's cwd"],
+  ["Ctrl+C (chat)", "interrupt turn / end session, back to shell"],
+  ["Shift+Tab", "cycle permission mode"],
+  ["Enter / Shift+Enter", "send / newline"],
+  ["Esc", "interrupt (drops queued prompts)"],
+  ["↑ / ↓", "prompt history (caret on first/last line)"],
+  ["/ , @", "slash commands, file completion"],
+  ["Ctrl+F", "find in conversation"],
+  ["Ctrl+L", "focus composer"],
+  ["Ctrl+R", "retry last prompt"],
+  ["Ctrl+Shift+T", "thread from selected text"],
+  ["Ctrl+Shift+F (shell)", "search scrollback"],
+  ["Ctrl+Shift+C (shell)", "copy selection"],
+  ["right-click", "pane menu (agent/terminal mode, find, export, close)"],
+  ["F1 / Ctrl+/", "this help"],
+];
+
 export default function App() {
   const apiRef = useRef<DockviewApi>(null);
+  const [help, setHelp] = useState(false);
   const onReady = (e: DockviewReadyEvent) => {
     apiRef.current = e.api;
     const saved = localStorage.getItem(LAYOUT_KEY);
@@ -39,6 +61,8 @@ export default function App() {
     // New panes inherit the active pane's cwd.
     const onKey = (e: KeyboardEvent) => {
       const api = apiRef.current;
+      if (e.key === "F1" || (e.ctrlKey && e.key === "/")) { e.preventDefault(); setHelp((h) => !h); return; }
+      if (e.key === "Escape") setHelp(false);
       if (!e.altKey || !api) return;
       const active = api.activePanel;
       if (e.code === "BracketLeft" || e.code === "BracketRight") {
@@ -68,6 +92,11 @@ export default function App() {
       <div className="dock">
         <DockviewReact theme={themeDark} components={components} onReady={onReady} />
       </div>
+      {help && (
+        <div className="help" onClick={() => setHelp(false)}>
+          <div><h3>shortcuts</h3><table><tbody>{SHORTCUTS.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v}</td></tr>)}</tbody></table></div>
+        </div>
+      )}
     </div>
   );
 }

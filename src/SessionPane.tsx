@@ -15,7 +15,8 @@ import { Menu } from "./Menu";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
-type Msg = { role: "user" | "assistant" | "err" | "thinking"; text: string; images?: Img[]; tokens?: number } | ToolMsg;
+type Msg = { role: "user" | "assistant" | "err" | "thinking"; text: string; images?: Img[]; tokens?: number; ts?: number } | ToolMsg;
+const DRAFT = (id: string) => `x-term.draft.${id}`; // composer text survives restarts / pane close
 type Task = { subject: string; status: string };
 const TASK_ICON: Record<string, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
 const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
@@ -181,7 +182,11 @@ type ChatProps = {
 /** One claude process + its message list. `compact` = embedded thread: no cwd bar, no statusline, no nested threads. */
 function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onState, onDone, onMsgs, onTerminal, onEnd }: ChatProps) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : "");
+  const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : localStorage.getItem(DRAFT(id)) ?? "");
+  useEffect(() => { // draft + auto-grow (capped by CSS max-height)
+    if (!compact) { if (input) localStorage.setItem(DRAFT(id), input); else localStorage.removeItem(DRAFT(id)); }
+    const ta = taRef.current; if (ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; }
+  }, [input]);
   const [images, setImages] = useState<Img[]>([]);
   const [pastes, setPastes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -237,7 +242,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   const setAssistant = (text: string) =>
     setMsgs((m) => {
       const last = m[m.length - 1];
-      return last?.role === "assistant" ? [...m.slice(0, -1), { role: "assistant", text }] : [...m, { role: "assistant", text }];
+      return last?.role === "assistant" ? [...m.slice(0, -1), { ...last, text }] : [...m, { role: "assistant", text, ts: Date.now() }];
     });
 
   /** Feeds the user's own Claude Code statusLine script (~/.claude/settings.json) the same JSON the CLI would. */
@@ -533,7 +538,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     if (busy && !force) { setQueue((q) => [...q, { text, images }]); return; }
     lastCmd.current = text.startsWith("/") ? text : "";
     if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
-    setMsgs((m) => [...m, { role: "user", text, images }]);
+    setMsgs((m) => [...m, { role: "user", text, images, ts: Date.now() }]);
     setBusy(true); setAtBottom(true);
     onState?.({ busy: true });
     turn.current = { start: Date.now(), tools: 0, done: "" };
@@ -593,6 +598,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
       return;
     }
     if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); cycleMode(); return; }
+    if (e.ctrlKey && e.key.toLowerCase() === "r" && !compact) { e.preventDefault(); const last = [...msgs].reverse().find((m) => m.role === "user"); if (last && last.role === "user") post(last.text, last.images ?? []); return; }
     if (e.ctrlKey && !e.shiftKey && e.key === "c" && !compact) { // like the CLI: first Ctrl+C interrupts a running turn, an idle Ctrl+C exits
       const ta = e.currentTarget as HTMLTextAreaElement;
       if (ta.selectionStart !== ta.selectionEnd) return; // copy
@@ -656,10 +662,22 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   for (const p of placed) if (p.showBody) p.y = Math.min(p.y, window.innerHeight - THREAD_H - 8);
 
   return (
-    <div className={`pane ${compact ? "compact" : ""}`} ref={rootRef}>
+    <div className={`pane ${compact ? "compact" : ""}`} ref={rootRef} onKeyDownCapture={(e) => {
+      if (compact) return;
+      if (e.ctrlKey && e.key.toLowerCase() === "l") { e.preventDefault(); e.stopPropagation(); taRef.current?.focus(); } // focus composer
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "t" && ask) { e.preventDefault(); e.stopPropagation(); openThread(); } // thread from selection
+    }}>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll}>
         {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : (
           <div key={i} className={`msg ${m.role}`}>
+            {(m.role === "user" || m.role === "assistant") && (
+              <span className="msg-bar">
+                {m.ts && <span className="dim">{new Date(m.ts).toLocaleTimeString()}</span>}
+                <button onClick={() => navigator.clipboard.writeText(m.text)} title="copy message">copy</button>
+                {m.role === "user" && <button onClick={() => { setInput(m.text); taRef.current?.focus(); }} title="load into composer">edit</button>}
+                {m.role === "user" && <button onClick={() => post(m.text, m.images ?? [])} title="send again">retry</button>}
+              </span>
+            )}
             {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} />)}
             {m.role === "err" ? m.text
               : m.role === "thinking" ? (m.text ? <details><summary>thinking</summary>{m.text}</details> : <span>thinking · ~{m.tokens ?? 0} tokens (content not exposed by the CLI for this model)</span>)
