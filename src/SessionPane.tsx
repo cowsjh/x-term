@@ -123,6 +123,8 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     const t = e.target as HTMLTextAreaElement;
     const has = (t.selectionStart != null && t.selectionStart !== t.selectionEnd) || !!sel();
     if (e.ctrlKey && !e.shiftKey && e.key === "c" && !has) { e.preventDefault(); onEnd(); }
+  };
+  const onKeyCapture = (e: React.KeyboardEvent) => { // capture: wins over the textarea's own handler
     if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "f") { e.preventDefault(); e.stopPropagation(); openFind(); }
   };
   const findRef = useRef<HTMLInputElement>(null);
@@ -152,7 +154,7 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     notify(params.title ?? api.title ?? "x-term", text.slice(0, 120));
   };
   return (
-    <div className="pane-wrap" onContextMenu={onCtx} onKeyDownCapture={onKey}>
+    <div className="pane-wrap" onContextMenu={onCtx} onKeyDown={onKey} onKeyDownCapture={onKeyCapture}>
       {find !== null && <input ref={findRef} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
       {toast && <div className="toast">{toast}</div>}
       <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} onTerminal={onTerminal} onEnd={onEnd} onMsgs={(m) => { msgsRef.current = m; }} />
