@@ -325,6 +325,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
               onTerminal(`(cd '${cwd.replace(/'/g, "'\\''")}' && claude '${cmd.replace(/'/g, "'\\''")}')`);
               continue;
             }
+            if (b.type === "text" && ev.message?.model === "<synthetic>") { // typed /model, /effort: mirror the CLI's confirmation into the dropdowns + status bar
+              const sm = /Set model to `([^`]+)`/.exec(b.text);
+              const wanted = sm?.[1].toLowerCase().replace(" (1m context)", " [1m]").replace(/ \(default\)$/, "").trim();
+              const mid = wanted && MODELS.find((m) => modelLabel(m) === wanted);
+              if (mid) { setModel(mid); localStorage.setItem("x-term.model", mid); info.current.model = mid; refreshStatus(); }
+              const se = /Set effort level to (\w+)/.exec(b.text);
+              if (se && EFFORTS.includes(se[1])) { setEffort(se[1]); localStorage.setItem("x-term.effort", se[1]); }
+            }
             if (b.type === "text" && !streaming.current) setAssistant(b.text);
           }
           break;
