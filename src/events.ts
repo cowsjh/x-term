@@ -15,3 +15,9 @@ export function onEvent<T extends { id: string }>(event: string, id: string, fn:
   return () => { handlers.get(event)?.delete(id); };
 }
 export { warn };
+/** Pane ids with a running turn; App warns before quitting while it is non-empty. */
+export const busyPanes = new Set<string>();
+/** Per chat pane, for the orchestration tools (agent_status / wait_agents) and the Alt+P / Alt+U jumps and the parent's
+ *  children summary: turn state, permission wait, unread, last answer, turns finished, who spawned it. */
+export type AgentState = { busy: boolean; perm: boolean; unread: boolean; last: string; turns: number; spawnedBy?: string };
+export const agents = new Map<string, AgentState>();

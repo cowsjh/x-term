@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { diffLines } from "diff";
+import { ansiToHtml } from "./ansi";
+import { invoke } from "@tauri-apps/api/core";
 
 export type SubStep = { name?: string; text: string }; // sub-agent (Agent/Task) activity, keyed by parent_tool_use_id
 export type ToolMsg = { role: "tool"; id: string; name: string; input: any; result?: string; error?: boolean; text: string; sub?: SubStep[] };
@@ -40,12 +42,15 @@ function Diff({ name, input }: { name: string; input: any }) {
   );
 }
 
-export function ToolCard({ m }: { m: ToolMsg }) {
+/** memo: the card object is replaced only when its own input/result changes, so streaming elsewhere does not re-render it. */
+export const ToolCard = memo(function ToolCard({ m }: { m: ToolMsg }) {
   const [open, setOpen] = useState(false);
   const lines = (m.result ?? "").split("\n").length;
   return (
     <div className={`msg tool ${m.error ? "error" : ""}`} onClick={() => setOpen((o) => !o)}>
-      <div className="tool-hdr">{open ? "▾" : "▸"} <b>{toolLabel(m.name)}</b> <span className="tool-sum">{summary(m.input).split("\n")[0].slice(0, 100)}</span>
+      <div className="tool-hdr">{open ? "▾" : "▸"} <b>{toolLabel(m.name)}</b> {typeof m.input?.file_path === "string"
+          ? <span className="tool-sum link" title="open in editor" onClick={(e) => { e.stopPropagation(); invoke("open_in_editor", { path: m.input.file_path, line: null }).catch(console.warn); }}>{m.input.file_path}</span>
+          : <span className="tool-sum">{summary(m.input).split("\n")[0].slice(0, 100)}</span>}
         <span className="tool-meta">{m.sub?.length ? `${m.sub.length} steps · ` : ""}{m.result === undefined ? "…" : m.error ? "error" : m.result ? `${lines} lines` : ""}</span></div>
       {open && (
         <div onClick={(e) => e.stopPropagation()}>
@@ -53,9 +58,9 @@ export function ToolCard({ m }: { m: ToolMsg }) {
           {Array.isArray(m.input?.todos) && <ul className="todos">{m.input.todos.map((t: any, i: number) => <li key={i} className={t.status}>{STATUS[t.status] ?? "☐"} {t.content}</li>)}</ul>}
           {!["Edit", "Write", "MultiEdit", "TodoWrite"].includes(m.name) && <pre className="tool-in">{JSON.stringify(m.input, null, 2)}</pre>}
           {m.sub?.length ? <div className="tool-sub">{m.sub.map((s, i) => <div key={i}>{s.name ? <b>{toolLabel(s.name)}</b> : null} {s.text.split("\n")[0].slice(0, 160)}</div>)}</div> : null}
-          {m.result !== undefined && <pre className="tool-res full">{m.result}</pre>}
+          {m.result !== undefined && <pre className="tool-res full" dangerouslySetInnerHTML={{ __html: ansiToHtml(m.result) }} />}
         </div>
       )}
     </div>
   );
-}
+});
