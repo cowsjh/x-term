@@ -14,7 +14,7 @@ import { Menu } from "./Menu";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string };
 type Img = { media_type: string; data: string };
-type Msg = { role: "user" | "assistant" | "err" | "thinking"; text: string; images?: Img[] } | ToolMsg;
+type Msg = { role: "user" | "assistant" | "err" | "thinking"; text: string; images?: Img[]; tokens?: number } | ToolMsg;
 type Task = { subject: string; status: string };
 const TASK_ICON: Record<string, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
 const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n));
@@ -271,8 +271,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
           if (d.type === "content_block_start" && d.content_block?.type === "thinking") {
             setActivity("Thinking");
             setMsgs((m) => [...m, { role: "thinking", text: "" }]);
-          } else if (d.type === "content_block_delta" && d.delta?.type === "thinking_delta" && d.delta.thinking) {
-            setMsgs((m) => { const last = m[m.length - 1]; return last?.role === "thinking" ? [...m.slice(0, -1), { role: "thinking", text: last.text + d.delta.thinking }] : m; });
+          } else if (d.type === "content_block_delta" && d.delta?.type === "thinking_delta") {
+            // newer models hide the text (only estimated_tokens + a signature arrive); keep the count so the row still says something
+            setMsgs((m) => { const last = m[m.length - 1]; return last?.role === "thinking" ? [...m.slice(0, -1), { role: "thinking", text: last.text + (d.delta.thinking ?? ""), tokens: d.delta.estimated_tokens ?? last.tokens }] : m; });
           } else if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
             streaming.current = "";
             const b = d.content_block;
@@ -592,7 +593,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
         {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : (
           <div key={i} className={`msg ${m.role}`}>
             {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} />)}
-            {m.role === "err" ? m.text : m.role === "thinking" ? <details><summary>thinking{m.text ? "" : " (hidden)"}</summary>{m.text}</details> : <Markdown {...plugins}>{m.text}</Markdown>}
+            {m.role === "err" ? m.text
+              : m.role === "thinking" ? (m.text ? <details><summary>thinking</summary>{m.text}</details> : <span>thinking · ~{m.tokens ?? 0} tokens (content not exposed by the CLI for this model)</span>)
+              : <Markdown {...plugins}>{m.text}</Markdown>}
           </div>
         ))}
         {queue.map((q, i) => (
