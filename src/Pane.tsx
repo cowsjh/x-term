@@ -16,8 +16,8 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
   const [agentCwd, setAgentCwd] = useState(params.cwd);
   const root = useRef<HTMLDivElement>(null);
   const switchTo = async (m: Mode) => {
-    // first hop into the chat starts it where the shell currently is (tracks `cd`)
-    if (m === "agent" && !seen.agent) setAgentCwd((await invoke<string>("pty_cwd", { id: api.id }).catch(() => "")) || params.cwd);
+    // every hop into the chat carries the shell's current directory; the chat applies it until its first message
+    if (m === "agent" && seen.term) { const d = await invoke<string>("pty_cwd", { id: api.id }).catch(() => ""); if (d) setAgentCwd(d); }
     setSeen((s) => ({ ...s, [m]: true }));
     setMode(m);
     api.updateParameters({ ...params, mode: m });

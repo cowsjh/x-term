@@ -210,6 +210,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   useEffect(() => {
     if (!cwd) invoke<string>("initial_cwd").then(setCwd);
   }, []);
+  useEffect(() => { // shell moved (cd + Ctrl+A): restart the idle claude process there; after the first message cwd is fixed
+    if (cwdProp && cwdProp !== cwd && !started) { setCwd(cwdProp); setGen((g) => g + 1); }
+  }, [cwdProp]);
 
   useEffect(() => {
     if (resumeProp && !fork && cwd) invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: resumeProp }).then((hist) => { if (hist.length) setMsgs(toMsgs(hist)); });
