@@ -65,8 +65,18 @@ const FORKS = "x-term.forks"; // session ids spawned by thread windows (--fork-s
 const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only after the first turn; cache across sessions
 // Context window comes from result.modelUsage[*].contextWindow after the first turn; 200k until then.
 const DEFAULT_CTX = 200_000;
-const toMsgs = (hist: { role: string; text: string }[]): Msg[] =>
-  hist.map((h) => (h.role === "tool" ? { role: "tool", id: crypto.randomUUID(), name: h.text.replace(/^▶ /, ""), input: {}, result: "", text: h.text } : { role: h.role as "user" | "assistant", text: h.text }));
+type Hist = { role: string; text: string; id?: string; input?: any; error?: boolean };
+const toMsgs = (hist: Hist[]): Msg[] => {
+  const out: Msg[] = [];
+  for (const h of hist) {
+    if (h.role === "tool_result") { // attach to its tool card
+      const t = out.find((m) => m.role === "tool" && m.id === h.id) as ToolMsg | undefined;
+      if (t) { t.result = h.text; t.error = !!h.error; }
+    } else if (h.role === "tool") out.push({ role: "tool", id: h.id ?? crypto.randomUUID(), name: h.text, input: h.input ?? {}, text: h.text });
+    else out.push({ role: h.role as "user" | "assistant", text: h.text });
+  }
+  return out;
+};
 const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
@@ -215,7 +225,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
   }, [cwdProp]);
 
   useEffect(() => {
-    if (resumeProp && !fork && cwd) invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: resumeProp }).then((hist) => { if (hist.length) setMsgs(toMsgs(hist)); });
+    if (resumeProp && !fork && cwd) invoke<Hist[]>("load_transcript", { cwd, id: resumeProp }).then((hist) => { if (hist.length) setMsgs(toMsgs(hist)); });
   }, []);
 
   useEffect(() => {
@@ -448,7 +458,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, onSt
     setSessions(null);
     sessionId.current = sess.id;
     switchThreads(sess.id);
-    const hist = await invoke<{ role: string; text: string }[]>("load_transcript", { cwd, id: sess.id });
+    const hist = await invoke<Hist[]>("load_transcript", { cwd, id: sess.id });
     setMsgs(toMsgs(hist));
     setTasks({});
     onState?.({ resume: sess.id, title: sess.summary.slice(0, 30) });

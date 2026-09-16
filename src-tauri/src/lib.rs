@@ -288,6 +288,15 @@ fn list_sessions(cwd: String) -> Vec<SessionInfo> {
 struct TranscriptMsg {
     role: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>, // tool_use id (role "tool") / tool_use_id (role "tool_result")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<bool>,
+}
+fn tm(role: &str, text: String) -> TranscriptMsg {
+    TranscriptMsg { role: role.into(), text, id: None, input: None, error: None }
 }
 
 /// User/assistant text of a stored session, for showing history when resuming.
@@ -304,14 +313,27 @@ fn load_transcript(cwd: String, id: String) -> Vec<TranscriptMsg> {
         let content = &v["message"]["content"];
         if let Some(t) = content.as_str() {
             if !t.starts_with('<') { // skip <command-name>/<local-command-caveat> bookkeeping records
-                out.push(TranscriptMsg { role: role.into(), text: t.into() });
+                out.push(tm(role, t.into()));
             }
             continue;
         }
         for b in content.as_array().into_iter().flatten() {
             match b["type"].as_str() {
-                Some("text") => out.push(TranscriptMsg { role: role.into(), text: b["text"].as_str().unwrap_or("").into() }),
-                Some("tool_use") => out.push(TranscriptMsg { role: "tool".into(), text: format!("▶ {}", b["name"].as_str().unwrap_or("")) }),
+                Some("text") => out.push(tm(role, b["text"].as_str().unwrap_or("").into())),
+                Some("tool_use") => out.push(TranscriptMsg {
+                    role: "tool".into(),
+                    text: b["name"].as_str().unwrap_or("").into(),
+                    id: b["id"].as_str().map(String::from),
+                    input: Some(b["input"].clone()),
+                    error: None,
+                }),
+                Some("tool_result") => {
+                    let c = &b["content"];
+                    let text = c.as_str().map(String::from).unwrap_or_else(|| {
+                        c.as_array().into_iter().flatten().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n")
+                    });
+                    out.push(TranscriptMsg { role: "tool_result".into(), text, id: b["tool_use_id"].as_str().map(String::from), input: None, error: b["is_error"].as_bool() });
+                }
                 _ => {}
             }
         }
@@ -408,6 +430,7 @@ mod tests {
         assert!(ss.windows(2).all(|w| w[0].mtime >= w[1].mtime), "newest first");
         let tr = load_transcript(cwd, ss[0].id.clone());
         assert!(tr.iter().any(|m| m.role == "user"), "transcript has user text");
-        assert!(tr.iter().all(|m| !m.text.is_empty() || m.role == "tool"));
+        assert!(tr.iter().all(|m| !m.text.is_empty() || m.role == "tool" || m.role == "tool_result"));
+        assert!(tr.iter().any(|m| m.role == "tool" && m.input.is_some()), "tool cards carry their input");
     }
 }
