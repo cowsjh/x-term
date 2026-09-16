@@ -84,12 +84,13 @@ const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
 export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<SessionParams>) {
   const [unread, setUnread] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  // right-click on empty chat area -> pane menu; text, inputs and thread windows keep the native menu
+  // right-click anywhere in the chat -> pane menu (inputs and thread windows keep the native menu)
   const onCtx = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest(".msg, textarea, input, select, .thread, .slash, .perm, pre")) return;
+    if ((e.target as HTMLElement).closest("textarea, input, select, .thread, .slash, .perm")) return;
     e.preventDefault();
     setMenu({ x: e.clientX, y: e.clientY });
   };
+  const sel = () => window.getSelection()?.toString() ?? "";
   useEffect(() => {
     const d = api.onDidActiveChange(({ isActive }) => { if (isActive) setUnread(false); });
     return () => d.dispose();
@@ -109,7 +110,7 @@ export function SessionPane({ api, containerApi, params }: IDockviewPanelProps<S
   return (
     <div className="pane-wrap" onContextMenu={onCtx}>
       <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} onState={onState} onDone={onDone} />
-      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[{ label: "Close", key: "c", run: () => api.close() }]} />}
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
 }

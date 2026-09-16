@@ -259,9 +259,18 @@ fn list_sessions(cwd: String) -> Vec<SessionInfo> {
             let id = e.path().file_stem()?.to_string_lossy().into_owned();
             let mtime = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
             let text = std::fs::read_to_string(e.path()).ok()?;
-            let summary = text
-                .lines()
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            let lines: Vec<serde_json::Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+            // stubs: sessions that only ran a local slash command (`/clear`, a typo) have no real user prompt
+            let has_prompt = lines.iter().any(|v| v["type"] == "user" && v["isMeta"] != true && match &v["message"]["content"] {
+                serde_json::Value::String(s) => !s.starts_with('<'),
+                serde_json::Value::Array(a) => a.iter().any(|b| b["type"] == "text" && !b["text"].as_str().unwrap_or("<").starts_with('<')),
+                _ => false,
+            });
+            if !has_prompt {
+                return None;
+            }
+            let summary = lines
+                .iter()
                 .filter_map(|v| v["lastPrompt"].as_str().or_else(|| v["message"]["content"].as_str()).map(|t| t.chars().take(80).collect::<String>()))
                 .last()
                 .unwrap_or_default();
