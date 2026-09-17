@@ -8,10 +8,10 @@ import { Pane, PaneParams } from "./Pane";
 import { cfg, applyConfig, toggleTheme, Config } from "./config";
 import { invoke } from "@tauri-apps/api/core";
 import { busyPanes, agents, warn } from "./events";
-import { pickAgentModel } from "./util";
+import { pickAgentModel, lsGet } from "./util";
 import { listen } from "@tauri-apps/api/event";
 import { is, label, Action } from "./keys";
-import { KeysDialog } from "./KeysDialog";
+import { Settings, Tab } from "./Settings";
 
 type SessionInfo = { id: string; mtime: number; summary: string; cwd: string };
 type Worktree = { path: string; branch: string; head: string; main: boolean };
@@ -164,7 +164,7 @@ const shortcuts = (): [string, string][] => [
   [`${label("jumpPerm")} / ${label("jumpUnread")}`, "next pane waiting for permission / with an unread answer"],
   [label("rename"), "rename pane"],
   [label("sidebar"), "sidebar: open panes, worktrees, every project's sessions"],
-  [`${label("changes")} (chat)`, "changes: git diff of the pane's repo"],
+  [`${label("changes")} (chat)`, "changes: git diff of the pane's repo; click a line to quote it into the composer, \"review\" asks Claude to review the diff"],
   ["/worktree name", "git worktree + new chat pane on that branch"],
   [`${label("agentMode")} (shell)`, "agent mode in the shell's cwd"],
   ["Ctrl+C (chat)", "interrupt turn / end session, back to shell"],
@@ -180,6 +180,7 @@ const shortcuts = (): [string, string][] => [
   [label("clear"), "/clear"],
   [label("run"), "run config `runCommand` in the pane's shell"],
   [label("thread"), "thread from selected text"],
+  [label("mark"), "mark (bookmark) selected text; click the mark to remove it"],
   [`${label("scrollUp")} / ${label("scrollDown")}`, "scroll conversation"],
   [`${label("prevMsg")} / ${label("nextMsg")}`, "previous / next user message"],
   [`${label("termSearch")} (shell)`, "search scrollback"],
@@ -198,7 +199,7 @@ async function saveWindow() {
   const w = getCurrentWindow();
   try {
     const [pos, size, max] = await Promise.all([w.outerPosition(), w.innerSize(), w.isMaximized()]);
-    const prev = JSON.parse(localStorage.getItem(WIN_KEY) ?? "{}");
+    const prev = lsGet(WIN_KEY, "{}");
     // maximized: keep the last normal geometry, only remember the flag
     localStorage.setItem(WIN_KEY, JSON.stringify(max ? { ...prev, max } : { x: pos.x, y: pos.y, w: size.width, h: size.height, max }));
   } catch (e) { warn(e); }
@@ -252,16 +253,15 @@ export default function App() {
   };
   const helpRef = useRef(false);
   helpRef.current = help;
-  const [keysDlg, setKeysDlg] = useState(false); // titlebar ⌨: shortcut editor; while open, no pane shortcut fires
-  const keysDlgRef = useRef(false);
-  keysDlgRef.current = keysDlg;
-  const openConfig = () => invoke<string>("open_config").then((p) => say(`opened ${p}`)).catch((e) => say(String(e))); // creates the file with a starter when missing
+  const [settings, setSettings] = useState<Tab | null>(null); // titlebar ⚙; while open, no pane shortcut fires
+  const settingsRef = useRef<Tab | null>(null);
+  settingsRef.current = settings;
   useEffect(() => {
     // capture phase: Escape closes the help overlay before any pane sees it (a pane's Escape interrupts a turn / denies a permission)
     const onEsc = (e: KeyboardEvent) => { if (e.key === "Escape" && helpRef.current) { e.preventDefault(); e.stopPropagation(); setHelp(false); } };
     window.addEventListener("keydown", onEsc, true);
     const onKey = async (e: KeyboardEvent) => {
-      if (keysDlgRef.current) return; // the shortcuts dialog owns the keyboard
+      if (settingsRef.current) return; // the settings dialog owns the keyboard
       const api = apiRef.current;
       const inShell = !!(e.target as HTMLElement | null)?.closest?.(".term"); // F1 / F2 belong to the shell's program there (htop, mc …)
       if ((is(e, "help") && !inShell) || is(e, "help2")) { e.preventDefault(); setHelp((h) => !h); return; }
@@ -283,7 +283,7 @@ export default function App() {
       }
       if (is(e, "sidebar")) { e.preventDefault(); setSide((s) => !s); return; }
       if (is(e, "theme")) { e.preventDefault(); toggleTheme(); return; }
-      if (is(e, "config")) { e.preventDefault(); openConfig(); return; }
+      if (is(e, "config")) { e.preventDefault(); setSettings("config"); return; }
       if (!api) return;
       const active = api.activePanel;
       const activeEl = active && document.querySelector<HTMLElement>(`.pane-root[data-id="${active.id}"]`);
@@ -365,8 +365,7 @@ export default function App() {
     <div className="app">
       <div className="titlebar" data-tauri-drag-region>
         <span data-tauri-drag-region>x-term</span>
-        <button className="tb" title="shortcuts: view and change key bindings" onClick={() => setKeysDlg(true)}>⌨ keys</button>
-        <button className="tb" title={`open config.json in the editor (${label("config")})`} onClick={openConfig}>⚙ config</button>
+        <button className="tb" title={`settings: config, shortcuts, appearance (${label("config")})`} onClick={() => setSettings("config")}>⚙ settings</button>
         <button onClick={() => win.minimize()}>–</button>
         <button onClick={() => win.toggleMaximize()}>▢</button>
         <button onClick={() => win.close()}>×</button>
@@ -412,7 +411,7 @@ export default function App() {
       </div>
       <AgentBar apiRef={apiRef} />
       {toast && <div className="toast app-toast">{toast}</div>}
-      {keysDlg && <KeysDialog onClose={() => setKeysDlg(false)} />}
+      {settings && <Settings tab={settings} onClose={() => setSettings(null)} />}
       {help && (
         <div className="help" onClick={() => setHelp(false)}>
           <div><h3>shortcuts</h3><table><tbody>{shortcuts().map(([k, v], i) => <tr key={i}><td>{k}</td><td>{v}</td></tr>)}</tbody></table></div>

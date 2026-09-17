@@ -36,7 +36,7 @@ struct ImageAttachment {
     data: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_session(
     app: AppHandle,
     state: State<Sessions>,
@@ -181,7 +181,7 @@ fn send_message(
 }
 
 /// Writes an exported conversation to `<exportDir>/<name>.md` (default ~/Downloads) and returns the path.
-#[tauri::command]
+#[tauri::command(async)]
 fn save_export(name: String, content: String) -> Result<String, String> {
     // the name becomes a filename: a separator or ".." would let a pane title write outside the export dir
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
@@ -199,7 +199,7 @@ fn save_export(name: String, content: String) -> Result<String, String> {
 }
 
 /// Runs the user's Claude Code statusLine command (from ~/.claude/settings.json) with `json` on stdin.
-#[tauri::command]
+#[tauri::command(async)]
 fn run_statusline(json: String) -> String {
     let cmd = std::fs::read_to_string(format!("{}/.claude/settings.json", home()))
         .ok()
@@ -234,7 +234,7 @@ struct Ptys(Mutex<HashMap<String, Pty>>);
 
 /// Spawn the config's `shell` (default `$SHELL`) in a pty. Output streams as `pty-data` {id, data} events (UTF-8 safe across chunk
 /// boundaries); `pty-exit` {id} when the shell exits.
-#[tauri::command]
+#[tauri::command(async)]
 fn pty_open(app: AppHandle, state: State<Ptys>, id: String, cwd: Option<String>, cols: u16, rows: u16) -> Result<(), String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     let pair = native_pty_system()
@@ -325,7 +325,7 @@ fn pty_close(state: State<Ptys>, id: String) {
 }
 
 /// Directory new panes start in: first CLI arg if given, else the directory x-term was launched from.
-#[tauri::command]
+#[tauri::command(async)]
 fn initial_cwd() -> String {
     std::env::args().nth(1).filter(|a| std::path::Path::new(a).is_dir())
         .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()))
@@ -407,7 +407,7 @@ fn log(msg: String) {
 }
 
 /// Effective config for a pane: global, or global + project overrides when `cwd` is given.
-#[tauri::command]
+#[tauri::command(async)]
 fn load_config(cwd: Option<String>) -> serde_json::Value {
     match cwd.filter(|c| !c.is_empty()) {
         Some(c) => config_for(&c),
@@ -416,7 +416,7 @@ fn load_config(cwd: Option<String>) -> serde_json::Value {
 }
 
 /// Path of the global config file, for "open my config" in the UI.
-#[tauri::command]
+#[tauri::command(async)]
 fn config_path() -> String {
     config_file()
 }
@@ -424,7 +424,7 @@ fn config_path() -> String {
 /// Merge `patch` into the global config file (top-level keys replace; `keys`/`agentModels` merge one level deep; a
 /// null value deletes the key) and write it back pretty-printed. Used by the shortcuts dialog. Comments in the file
 /// are not preserved (the file is JSON).
-#[tauri::command]
+#[tauri::command(async)]
 fn save_config_patch(patch: serde_json::Value) -> Result<(), String> {
     let path = std::path::PathBuf::from(config_file());
     let mut cur = match std::fs::read_to_string(&path) {
@@ -452,7 +452,7 @@ fn save_config_patch(patch: serde_json::Value) -> Result<(), String> {
 }
 
 /// Everything after argv[0] (x-term's own command line), so the UI can react to launch flags.
-#[tauri::command]
+#[tauri::command(async)]
 fn cli_args() -> Vec<String> {
     std::env::args().skip(1).collect()
 }
@@ -474,11 +474,12 @@ fn watch_config(app: AppHandle) {
 }
 
 /// Local image file -> base64 for attaching (OS drop of a .png/.jpg onto the chat).
-#[tauri::command]
+#[tauri::command(async)]
 fn read_image(path: String) -> Result<ImageOut, String> {
     let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let media_type = match ext.as_str() { "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "gif" => "image/gif", "webp" => "image/webp", _ => return Err("not an image".into()) };
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    if bytes.len() > 10 << 20 { return Err("image over 10 MB (API limit)".into()) }
     Ok(ImageOut { media_type: media_type.into(), data: base64(&bytes) })
 }
 
@@ -512,7 +513,7 @@ struct SearchHit {
 /// Full-text search over every stored transcript (~/.claude/projects/*/*.jsonl), newest first. Match = a user or
 /// assistant text line containing `query` (case-insensitive).
 /// ponytail: full scan of every transcript per query; build an index if it gets slow.
-#[tauri::command]
+#[tauri::command(async)]
 async fn search_sessions(query: String) -> Vec<SearchHit> {
     let q = query.to_lowercase();
     if q.trim().is_empty() { return vec![] }
@@ -612,7 +613,7 @@ fn sessions_in(dir: std::path::PathBuf) -> Vec<SessionInfo> {
 }
 
 /// Past sessions for `cwd`, newest first. Summary = last recorded prompt.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_sessions(cwd: String) -> Vec<SessionInfo> {
     let mut out = sessions_in(project_dir(&cwd));
     out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
@@ -620,7 +621,7 @@ fn list_sessions(cwd: String) -> Vec<SessionInfo> {
 }
 
 /// Every project's sessions (sidebar), newest first, capped.
-#[tauri::command]
+#[tauri::command(async)]
 async fn list_all_sessions() -> Vec<SessionInfo> {
     let Ok(rd) = std::fs::read_dir(format!("{}/.claude/projects", home())) else { return vec![] };
     let mut out: Vec<SessionInfo> = rd.filter_map(|e| e.ok()).flat_map(|p| sessions_in(p.path())).collect();
@@ -647,7 +648,7 @@ struct GitStatus {
 }
 
 /// Working-tree changes vs HEAD for the repo containing `cwd`.
-#[tauri::command]
+#[tauri::command(async)]
 fn git_status(cwd: String) -> Result<GitStatus, String> {
     let root = git_root(&cwd)?;
     let files = git(&root, &["status", "--porcelain", "--untracked-files=all"])?.lines().filter(|l| l.len() > 3).map(|l| (l[..2].trim().to_string(), l[3..].to_string())).collect();
@@ -655,7 +656,7 @@ fn git_status(cwd: String) -> Result<GitStatus, String> {
 }
 
 /// Unified diff vs HEAD (one root-relative path or everything); untracked files diff against /dev/null.
-#[tauri::command]
+#[tauri::command(async)]
 fn git_diff(cwd: String, path: Option<String>) -> Result<String, String> {
     let root = git_root(&cwd)?;
     match path {
@@ -688,7 +689,7 @@ fn worktree_path(template: &str, repo: &str, name: &str) -> String {
 }
 
 /// Worktree for `name`: `worktreeDir` (default `<toplevel>-wt/<name>`) on branch `name` (created if missing). Returns its path.
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree(cwd: String, name: String) -> Result<String, String> {
     if !valid_name(&name, false) { return Err("worktree name: letters, digits, - _ only".into()) }
     let top = git_root(&cwd)?;
@@ -743,14 +744,14 @@ fn worktrees(cwd: &str) -> Result<Vec<WorktreeInfo>, String> {
     Ok(parse_worktrees(&git(&top, &["worktree", "list", "--porcelain"])?))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree_list(cwd: String) -> Result<Vec<WorktreeInfo>, String> {
     worktrees(&cwd)
 }
 
 /// Merge `branch` into the repo's MAIN worktree (where the user's real checkout lives). A failed merge is rolled
 /// back with `merge --abort` so the main checkout is never left mid-conflict.
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree_merge(cwd: String, branch: String) -> Result<String, String> {
     if !valid_name(&branch, true) { return Err("branch name: letters, digits, - _ / . only".into()) }
     let main = worktrees(&cwd)?.into_iter().next().ok_or("no worktrees")?.path;
@@ -768,7 +769,7 @@ fn git_worktree_merge(cwd: String, branch: String) -> Result<String, String> {
 }
 
 /// Remove a worktree (never the main one, never --force: a dirty tree must fail loudly) and optionally its branch.
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree_remove(cwd: String, path: String, delete_branch: bool) -> Result<(), String> {
     let list = worktrees(&cwd)?;
     let main = list.first().ok_or("no worktrees")?;
@@ -786,7 +787,7 @@ fn git_worktree_remove(cwd: String, path: String, delete_branch: bool) -> Result
 }
 
 /// Open `path` (optionally at `line`) with the `editor` template from config; default `code -g {path}:{line}`.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_in_editor(path: String, line: Option<u32>) -> Result<(), String> {
     let tpl = config()["editor"].as_str().unwrap_or("code -g {path}:{line}").to_string();
     let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
@@ -805,7 +806,7 @@ fn on_path(prog: &str) -> bool {
 }
 
 /// Titlebar ⚙ / Ctrl+, / `/config`: make sure the file exists (with a starter holding the main defaults) and open it.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_config() -> Result<String, String> {
     let path = std::path::PathBuf::from(config_file());
     if !path.is_file() {
@@ -838,7 +839,7 @@ fn tm(role: &str, text: String) -> TranscriptMsg {
 }
 
 /// User/assistant text of a stored session, for showing history when resuming.
-#[tauri::command]
+#[tauri::command(async)]
 fn load_transcript(cwd: String, id: String) -> Vec<TranscriptMsg> {
     let path = project_dir(&cwd).join(format!("{id}.jsonl"));
     let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
@@ -880,7 +881,7 @@ fn load_transcript(cwd: String, id: String) -> Vec<TranscriptMsg> {
 }
 
 /// Slash commands from user-level and project-level skills/commands dirs (CLI only reports its list after the first turn).
-#[tauri::command]
+#[tauri::command(async)]
 fn list_skills(cwd: String) -> Vec<String> {
     let mut out = vec![];
     for base in [home(), cwd] {
@@ -902,7 +903,7 @@ fn write_line(state: State<Sessions>, id: String, line: String) -> Result<(), St
 }
 
 /// Relative paths under `cwd` containing `query` (case-insensitive), depth <= 5, skipping build/vcs dirs. For `@file` completion.
-#[tauri::command]
+#[tauri::command(async)]
 async fn list_files(cwd: String, query: String) -> Vec<String> {
     fn walk(dir: &std::path::Path, root: &std::path::Path, q: &str, depth: u8, out: &mut Vec<String>) {
         if depth > 5 || out.len() >= 40 { return; }

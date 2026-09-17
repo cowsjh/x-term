@@ -15,8 +15,8 @@ import { Menu } from "./Menu";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { cfg, projectConfig } from "./config";
-import { is } from "./keys";
-import { Img, Msg, Hist, modelLabel, fmtTok, fmtSec, toMsgs, expandPastes, IMAGE_EXT } from "./util";
+import { is, label } from "./keys";
+import { Img, Msg, Hist, Paste, modelLabel, fmtTok, fmtSec, toMsgs, takeContext, pushContext, IMAGE_EXT, diffLines, diffStat, lsGet, mdBlocks, MODES, MODELS, EFFORTS } from "./util";
 import type { PaneStatus } from "./Pane";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string; prompt?: string; spawnedBy?: string; model?: string; effort?: string }; // prompt: sent once the process is up (spawned agents); model/effort: per-pane override (spawn_agents weight)
@@ -25,24 +25,19 @@ type Task = { subject: string; status: string };
 const TASK_ICON: Record<string, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
 type SessionInfo = { id: string; mtime: number; summary: string; cwd?: string }; // cwd set for /search hits (other projects)
 type Perm = { request_id: string; tool_name: string; input: any; description?: string; permission_suggestions?: any[] };
-const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
 const MODE_KEY = "x-term.permissionMode";
-// "" = CLI default. Before the first message these restart the process with --model/--effort; after, they are sent as /model and /effort.
-// Full ids: the CLI rejects short forms like `opus-4-8[1m]`; `[1m]` = 1M context variant.
-const MODELS = ["claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5", "claude-opus-5[1m]", "claude-opus-4-8", "claude-opus-4-8[1m]", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-5[1m]", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
-const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const LOCAL = ["resume", "search", "title", "worktree", "config"]; // handled by x-term itself, never sent to the CLI
 const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 // Follow-up thread window. ax/ay = anchor in .msgs content coords; rendered fixed (portal), follows scroll, stacks at the top when its text scrolls out
 /** `resume` = main session it forked from, `sid` = the thread's own (forked) session once known -> restored with --resume, no re-fork. */
-type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; sid?: string; open: boolean };
+type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; sid?: string; open: boolean; mark?: boolean }; // mark = highlight only (bookmark), no session
 // Threads belong to a conversation: stored per main session id, swapped in/out together with it.
 const threadsKey = (sid: string) => `x-term.threads.${sid}`;
 const loadThreads = (sid?: string): Thread[] => (sid ? JSON.parse(localStorage.getItem(threadsKey(sid)) ?? "[]") : []);
 const THREAD_INDEX = "x-term.threads.index"; // insertion-ordered session ids; oldest thread sets are dropped past the cap
 const THREAD_CAP = 100;
 function touchThreadIndex(sid: string) {
-  const idx: string[] = JSON.parse(localStorage.getItem(THREAD_INDEX) ?? "[]").filter((x: string) => x !== sid);
+  const idx: string[] = lsGet(THREAD_INDEX, "[]").filter((x: string) => x !== sid);
   idx.push(sid);
   for (const old of idx.splice(0, Math.max(0, idx.length - THREAD_CAP))) localStorage.removeItem(threadsKey(old));
   localStorage.setItem(THREAD_INDEX, JSON.stringify(idx));
@@ -101,7 +96,10 @@ const LONG = 4000; // assistant messages past this fold to a preview until click
 type RowActs = { edit: (m: Plain) => void; retry: (m: Plain) => void };
 /** One message. memo: a streaming turn re-renders only the last row, not every Markdown tree in the list. */
 type Plain = Exclude<Msg, { role: "tool" }>;
-const Row = memo(function Row({ m, last, acts }: { m: Plain; last: boolean; acts: React.RefObject<RowActs> }) {
+const Block = memo(function Block({ text }: { text: string }) { return <Markdown {...plugins}>{text}</Markdown>; });
+/** While streaming, only the trailing block re-parses per frame; the finished turn renders as one document again. */
+const StreamMd = ({ text }: { text: string }) => <>{mdBlocks(text).map((b, i) => <Block key={i} text={b} />)}</>;
+const Row = memo(function Row({ m, last, stream, acts }: { m: Plain; last: boolean; stream?: boolean; acts: React.RefObject<RowActs> }) {
   const [open, setOpen] = useState(false);
   const fold = m.role === "assistant" && !last && !open && m.text.length > LONG;
   return (
@@ -117,14 +115,14 @@ const Row = memo(function Row({ m, last, acts }: { m: Plain; last: boolean; acts
       {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} title="click to enlarge" />)}
       {m.role === "err" || m.role === "note" ? m.text
         : m.role === "thinking" ? (m.text ? <details><summary>thinking</summary>{m.text}</details> : <span>thinking · ~{m.tokens ?? 0} tokens</span>)
-        : <Markdown {...plugins}>{fold ? m.text.slice(0, LONG) : m.text}</Markdown>}
+        : stream ? <StreamMd text={m.text} /> : <Markdown {...plugins}>{fold ? m.text.slice(0, LONG) : m.text}</Markdown>}
       {fold && <button className="more" onClick={() => setOpen(true)}>show all ({m.text.length.toLocaleString()} chars)</button>}
     </div>
   );
 });
 /** Conversation as markdown (for export). */
 const toMarkdown = (msgs: Msg[]) => msgs.map((m) => m.role === "user" ? `## User\n\n${m.text}` : m.role === "assistant" ? `## Assistant\n\n${m.text}` : m.role === "tool" ? `> **${m.name}** ${toolSummary(m.input)}${m.result ? `\n\n\`\`\`\n${m.result.slice(0, 4000)}\n\`\`\`` : ""}` : "").filter(Boolean).join("\n\n");
-// Long multi-line pastes become a chip (like the CLI's "[Pasted text #N]") and are expanded back into the prompt on send
+// Long multi-line pastes become a chip above the composer and are appended to the prompt on send
 const SPIN = ["✻", "✽", "✶", "✳", "✢", "·"];
 const toolSummary = (input: any) => (typeof input?.command === "string" ? input.command : input?.file_path ?? input?.pattern ?? input?.description ?? "");
 const PASTE_LINES = 6;
@@ -136,9 +134,11 @@ const DEFAULT_CTX = 200_000;
 const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
 // Thread quotes are painted with the CSS Custom Highlight API (no DOM edits under React): one shared registry per state, panes add/remove their own ranges.
-const HL = { closed: new Highlight(), open: new Highlight() };
+const HL = { closed: new Highlight(), open: new Highlight(), mark: new Highlight() };
 CSS.highlights.set("thread", HL.closed);
 CSS.highlights.set("thread-open", HL.open);
+CSS.highlights.set("mark", HL.mark);
+const unpaint = (r: Range) => { HL.closed.delete(r); HL.open.delete(r); HL.mark.delete(r); };
 /** Range covering `quote` inside `root`, matched with all whitespace removed (markdown rendering re-wraps it). First occurrence. */
 function findQuote(root: Node, quote: string): Range | null {
   const q = quote.replace(/\s+/g, "");
@@ -181,6 +181,10 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     const files = [...st.files].sort((a, b) => Number(touched.has(`${st.root}/${b[1]}`)) - Number(touched.has(`${st.root}/${a[1]}`)));
     setChanges({ root: st.root, files: files.map(([k, f]) => [touched.has(`${st.root}/${f}`) ? `✎${k}` : k, f]), sel: null, diff: await invoke<string>("git_diff", { cwd: params.cwd ?? "", path: null }).catch(String) });
   };
+  // click a diff line -> quoted into the composer (file:line + the line); several clicks, one message, like Desktop's batched review comments
+  const quoteLine = (file: string, line: number | undefined, text: string) => pushContext(api.id, { text: `${file}${line ? `:${line}` : ""}\n${text}`, label: file, ask: true });
+  const reviewCode = () => { setChanges(null); document.querySelector(`.pane-root[data-id="${api.id}"]`)?.dispatchEvent(new CustomEvent("x-term-send", { detail: "Review the current uncommitted changes (git diff HEAD). Report only high-signal issues: compile errors, definite logic errors, security vulnerabilities, obvious bugs. Skip style, formatting and pre-existing problems. Cite file:line for each." })); };
+  const [stat, setStat] = useState<{ add: number; del: number } | null>(null); // +N -M after a turn that edited files; click opens changes
   const loadDiff = async (path: string | null) => {
     setChanges((c) => c && { ...c, sel: path, diff: "…" });
     const diff = await invoke<string>("git_diff", { cwd: params.cwd ?? "", path }).catch(String);
@@ -235,6 +239,7 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
   };
   const onDone = (text: string) => {
     const a = agents.get(api.id); if (a) agents.set(api.id, { ...a, last: text, turns: a.turns + 1 });
+    if (msgsRef.current.some((m) => m.role === "tool" && ["Edit", "Write", "MultiEdit"].includes(m.name ?? ""))) invoke<string>("git_diff", { cwd: params.cwd ?? "", path: null }).then((d) => setStat(diffStat(d))).catch(() => {});
     if (api.isActive && document.hasFocus()) return;
     setUnread(true);
     if (cfg.notify === "all") notify(params.title ?? api.title ?? "x-term", text.slice(0, 120));
@@ -243,11 +248,12 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
     <div className={`pane-wrap ${unread ? "unread" : ""}`} onContextMenu={onCtx} onKeyDownCapture={onKeyCapture}>
       {find !== null && <input ref={findRef} className="findbar" placeholder="find (Enter next, Shift+Enter prev, Esc)" value={find} onChange={(e) => setFind(e.target.value)} onKeyDown={onFindKey} autoFocus />}
       {toast && <div className="toast">{toast}</div>}
+      {stat && !changes && (stat.add || stat.del) ? <button className="diffstat" title="changes (git diff)" onClick={openChanges}><span className="add">+{stat.add}</span> <span className="del">−{stat.del}</span></button> : null}
       <Chat id={api.id} cwd={params.cwd} resume={params.resume} fork={params.fork} quote={params.quote} prompt={params.prompt} model={params.model} effort={params.effort} title={params.title} spawned={!!params.spawnedBy} onState={onState} onDone={onDone} onLive={onLive} onTerminal={onTerminal} onEnd={onEnd} onMsgs={(m) => { msgsRef.current = m; }} onPerm={onPerm} />
       {changes && (
         <div className="changes">
           <div className="changes-files">
-            <div className="changes-hdr" title={changes.root}>changes · {changes.root.replace(/^.*\//, "")} <button onClick={() => setChanges(null)}>✕</button></div>
+            <div className="changes-hdr" title={changes.root}>changes · {changes.root.replace(/^.*\//, "")} <span><button title="ask Claude to review the diff" onClick={reviewCode}>review</button> <button onClick={() => setChanges(null)}>✕</button></span></div>
             <div className={`changes-file ${changes.sel === null ? "sel" : ""}`} onClick={() => loadDiff(null)}>all ({changes.files.length})</div>
             {changes.files.map(([st, f]) => (
               <div key={f} className={`changes-file ${changes.sel === f ? "sel" : ""} ${st.startsWith("✎") ? "touched" : ""}`} onClick={() => loadDiff(f)} title={f}>
@@ -256,10 +262,14 @@ export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerm
               </div>
             ))}
           </div>
-          <div className="changes-diff">{changes.diff ? changes.diff.split("\n").map((l, i) => <pre key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : l.startsWith("@@") ? "hunk" : l.startsWith("diff ") ? "file" : ""}>{l}</pre>) : <span className="dim">no changes vs HEAD</span>}</div>
+          <div className="changes-diff">{changes.diff ? diffLines(changes.diff).map((r, i) => (
+            <pre key={i} className={r.cls} title={r.file && r.cls !== "file" ? "click: quote into the composer" : undefined} onClick={r.file && r.cls !== "file" ? () => quoteLine(r.file!, r.line, r.t) : undefined}>
+              {r.file && r.cls !== "file" && r.cls !== "hunk" && <span className="ln">{r.line ?? ""}</span>}{r.t}
+            </pre>
+          )) : <span className="dim">no changes vs HEAD</span>}</div>
         </div>
       )}
-      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }] : []), { label: "Find", key: "f", run: openFind }, { label: "Changes (git diff)", key: "d", run: openChanges }, { label: "Export markdown", key: "e", run: exportMd }, { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[...(sel() ? [{ label: "Copy", key: "y", run: () => navigator.clipboard.writeText(sel()) }, { label: "Add to context", key: "x", run: () => pushContext(api.id, { text: sel(), label: "selection" }) }] : []), { label: "Find", key: "f", run: openFind }, { label: "Changes (git diff)", key: "d", run: openChanges }, { label: "Export markdown", key: "e", run: exportMd }, { label: "Terminal mode", key: "t", run: onSwitch }, { label: "Close", key: "c", run: () => api.close() }]} />}
     </div>
   );
 }
@@ -286,13 +296,25 @@ type ChatProps = {
 function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prompt, title, spawned, model: modelProp, effort: effortProp, onState, onDone, onLive, onMsgs, onTerminal, onEnd, onPerm }: ChatProps) {
   const promptRef = useRef(prompt); // spawned agent: first message, sent once the process is up
   const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [input, setInput] = useState(quote ? `> ${quote.replace(/\n/g, "\n> ")}\n\n` : localStorage.getItem(DRAFT(id)) ?? "");
+  const [input, setInput] = useState(localStorage.getItem(DRAFT(id)) ?? "");
+  const [quotes, setQuotes] = useState<string[]>(quote ? [quote] : []); // "ask about this" text: shown above the composer, prepended on send, never editable by accident
   useEffect(() => { // draft + auto-grow (capped by CSS max-height)
     if (!compact) { if (input) localStorage.setItem(DRAFT(id), input); else localStorage.removeItem(DRAFT(id)); }
     const ta = taRef.current; if (ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; }
   }, [input]);
   const [images, setImages] = useState<Img[]>([]);
-  const [pastes, setPastes] = useState<string[]>([]);
+  const [pastes, setPastesState] = useState<Paste[]>([]);
+  const pastesRef = useRef(pastes); // synchronous mirror: several context items can arrive in one tick and each needs its own chip number
+  const setPastes = (v: Paste[]) => { pastesRef.current = v; setPastesState(v); };
+  const [inspect, setInspect] = useState<Paste | null>(null); // chip clicked: show exactly what the model will get
+  const addPaste = (p: Paste) => setPastes([...pastesRef.current, p]); // everything pasted / dropped / added is a chip above the composer, never text in it
+  /** Files by path (OS drop, file:// paste): images become thumbnails, the rest `@path` chips (the CLI reads them). */
+  const addPaths = (paths: string[]) => {
+    for (const p of paths) {
+      if (IMAGE_EXT.test(p)) invoke<Img>("read_image", { path: p }).then((im) => setImages((x) => [...x, im])).catch(warn);
+      else addPaste({ text: `@${p}`, label: `📄 ${p.replace(/^.*\//, "")}` });
+    }
+  };
   const [busy, setBusy] = useState(false);
   const live = useRef({ busy, onEnd }); // for the pane-level Ctrl+C listener (bound once)
   live.current = { busy, onEnd };
@@ -301,9 +323,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     const el = rootRef.current?.closest(".pane-root"); if (!el) return;
     const h = () => { if (live.current.busy) { control({ subtype: "interrupt" }); setQueue([]); } else live.current.onEnd?.(); };
     const send = (e: Event) => postRef.current((e as CustomEvent<string>).detail, []);
-    el.addEventListener("x-term-ctrlc", h); el.addEventListener("x-term-send", send);
-    return () => { el.removeEventListener("x-term-ctrlc", h); el.removeEventListener("x-term-send", send); };
+    const ctx = () => { takeContext(id).forEach((c) => ctxRef.current(c)); taRef.current?.focus(); };
+    el.addEventListener("x-term-ctrlc", h); el.addEventListener("x-term-send", send); el.addEventListener("x-term-context", ctx);
+    ctx(); // queued before this chat existed (shell menu on a terminal-only pane)
+    return () => { el.removeEventListener("x-term-ctrlc", h); el.removeEventListener("x-term-send", send); el.removeEventListener("x-term-context", ctx); };
   }, []);
+  const ctxRef = useRef((_c: { text: string; label: string; ask?: boolean }) => {});
+  ctxRef.current = (c) => { // ask: quoted into the composer like a thread; else a chip, fenced so the model sees where it came from
+    if (c.ask) setQuotes((q) => [...q, c.text]);
+    else addPaste({ text: `${c.label}:\n\`\`\`\n${c.text}\n\`\`\``, label: `${c.label}, ${c.text.split("\n").length} lines` });
+  };
   const [queue, setQueue] = useState<{ text: string; images: Img[] }[]>([]); // prompts typed while a turn runs; sent one per result
   const queueRef = useRef(queue);
   queueRef.current = queue;
@@ -317,6 +346,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const [activity, setActivity] = useState(""); // CLI-style status line: what is running right now
   useEffect(() => { onLive?.({ activity }); }, [activity]); // mirror into the pane header strip (spawned agents)
   const [tick, setTick] = useState(0); // 1s re-render while busy for the elapsed counter
+  const [layout, setLayout] = useState(0); // list resized: re-place quote boxes / thread windows
   const turn = useRef({ start: 0, tools: 0, done: "" });
   const [cwd, setCwd] = useState(cwdProp ?? "");
   const [gen, setGen] = useState(0); // bump to restart the claude process
@@ -349,25 +379,29 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const quoteRanges = useRef<Range[]>([]); // painted quote ranges, removed from the registry before repainting
   // Transparent hit boxes over each quote's line boxes (in .msgs content coords): pointer cursor, no text selection, click toggles the window
   type Box = { l: number; t: number; w: number; h: number };
-  const [quoteBoxes, setQuoteBoxes] = useState<{ id: string; open: boolean; boxes: Box[]; dot: { l: number; t: number } }[]>([]);
-  useEffect(() => { // paint quotes; re-run whenever the list content may have changed
+  const [quoteBoxes, setQuoteBoxes] = useState<{ id: string; cls: string; boxes: Box[]; dot: { l: number; t: number } }[]>([]);
+  const threadCls = (t: Thread) => (t.mark ? "mark" : t.open ? "open" : "");
+  useEffect(() => { // paint quotes; re-run whenever the list content may have changed (debounced: streaming appends below the quotes, so per-frame walks are wasted)
+    const t = setTimeout(() => {
     const list = listRef.current;
-    for (const r of quoteRanges.current) { HL.closed.delete(r); HL.open.delete(r); }
+    quoteRanges.current.forEach(unpaint);
     quoteRanges.current = [];
     const lr = list?.getBoundingClientRect();
     const hits: typeof quoteBoxes = [];
     if (list && lr) for (const t of threads) {
       const r = findQuote(list, t.quote);
       if (!r) continue;
-      (t.open ? HL.open : HL.closed).add(r);
+      (t.mark ? HL.mark : t.open ? HL.open : HL.closed).add(r);
       quoteRanges.current.push(r);
       const box = (b: DOMRect): Box => ({ l: b.left - lr.left + list.scrollLeft, t: b.top - lr.top + list.scrollTop, w: b.width, h: b.height });
       const bb = box(r.getBoundingClientRect());
-      hits.push({ id: t.id, open: t.open, boxes: [...r.getClientRects()].map(box), dot: { l: bb.l + bb.w, t: bb.t } });
+      hits.push({ id: t.id, cls: threadCls(t), boxes: [...r.getClientRects()].map(box), dot: { l: bb.l + bb.w, t: bb.t } });
     }
     setQuoteBoxes(hits);
-  }, [threads, msgs, tick]);
-  useEffect(() => () => { for (const r of quoteRanges.current) { HL.closed.delete(r); HL.open.delete(r); } }, []);
+    }, 100);
+    return () => clearTimeout(t);
+  }, [threads, msgs, layout]);
+  useEffect(() => () => quoteRanges.current.forEach(unpaint), []);
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
   const lastText = useRef("");
   const lastCmd = useRef(""); // last slash command sent; re-run in the terminal if the CLI says it is interactive-only
@@ -427,12 +461,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    const h = (e: Event) => {
-      const paths = (e as CustomEvent<string[]>).detail;
-      for (const p of paths.filter((p) => IMAGE_EXT.test(p))) invoke<Img>("read_image", { path: p }).then((im) => setImages((x) => [...x, im])).catch(warn);
-      setInput((v) => v + paths.filter((p) => !IMAGE_EXT.test(p)).map((p) => `@${p} `).join(""));
-      taRef.current?.focus();
-    };
+    const h = (e: Event) => { addPaths((e as CustomEvent<string[]>).detail); taRef.current?.focus(); };
     el.addEventListener("x-term-drop", h);
     return () => el.removeEventListener("x-term-drop", h);
   }, []);
@@ -440,7 +469,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   useEffect(() => {
     if (!cwd) return;
     invoke<string[]>("list_skills", { cwd }).then((sk) => {
-      const builtins: string[] = JSON.parse(localStorage.getItem(BUILTINS) ?? "[]");
+      const builtins: string[] = lsGet(BUILTINS, "[]");
       info.current.commands = [...new Set([...sk, ...builtins])].sort();
     });
   }, [cwd]);
@@ -467,7 +496,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             onState?.({ cwd: ev.cwd, resume: ev.session_id });
             info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
             localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
-            if (fork) localStorage.setItem(FORKS, JSON.stringify([...new Set([...JSON.parse(localStorage.getItem(FORKS) ?? "[]"), ev.session_id])].slice(-300)));
+            if (fork) localStorage.setItem(FORKS, JSON.stringify([...new Set([...lsGet(FORKS, "[]"), ev.session_id])].slice(-300)));
             refreshStatus();
           }
           break;
@@ -620,7 +649,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   useEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
   useEffect(() => { // list shown/hidden (Ctrl+A / Ctrl+C) or resized: re-place thread windows after layout
     if (compact || !listRef.current) return;
-    const ro = new ResizeObserver(() => setTick((x) => x + 1));
+    const ro = new ResizeObserver(() => setLayout((x) => x + 1));
     ro.observe(listRef.current);
     return () => ro.disconnect();
   }, []);
@@ -702,8 +731,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   };
 
   const send = async () => {
-    const text = expandPastes(input, pastes);
-    if (!text && !images.length) return;
+    const typed = input.trim();
+    if (!typed && !images.length && !quotes.length) return;
+    const text = typed.startsWith("/") || typed.startsWith("!") ? typed
+      : [...quotes.map((q) => `> ${q.replace(/\n/g, "\n> ")}`), typed, ...pastes.map((p) => p.text)].filter(Boolean).join("\n\n");
     if (text.startsWith("!") && onTerminal) { setInput(""); onTerminal(text.slice(1)); return; } // like the CLI: `!cmd` runs in the shell
     const title = /^\/title\s+(.+)/.exec(text);
     if (title) { setInput(""); setSlash([]); onState?.({ title: title[1].trim().slice(0, 40) }); return; } // pane title (export name, notifications)
@@ -725,14 +756,14 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     }
     if (/^\/resume\b/.test(text)) { // CLI's /resume is an interactive picker; unavailable in -p mode
       setInput(""); setSlash([]);
-      const forks = new Set<string>(JSON.parse(localStorage.getItem(FORKS) ?? "[]"));
+      const forks = new Set<string>(lsGet(FORKS, "[]"));
       setSlashIdx(0);
       setSessions((await invoke<SessionInfo[]>("list_sessions", { cwd })).filter((s) => !forks.has(s.id)));
       return;
     }
-    if (text) { const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]").filter((x: string) => x !== text); h.push(text); localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-100))); }
+    if (text) { const h: string[] = lsGet(HIST_KEY, "[]").filter((x: string) => x !== text); h.push(text); localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-100))); }
     histPos.current = -1;
-    setInput(""); setImages([]); setPastes([]); setSlash([]);
+    setInput(""); setImages([]); setPastes([]); setQuotes([]); setSlash([]);
     post(text, images);
   };
   /** Send now, or park in the queue while a turn is running (drained one per `result`). */
@@ -827,12 +858,12 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     // prompt history: ↑/↓ when the caret is on the first/last line
     const ta = e.currentTarget as HTMLTextAreaElement;
     if (e.key === "ArrowUp" && !ta.value.slice(0, ta.selectionStart).includes("\n")) {
-      const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]");
+      const h: string[] = lsGet(HIST_KEY, "[]");
       if (histPos.current + 1 < h.length) { e.preventDefault(); histPos.current++; setInput(h[h.length - 1 - histPos.current]); }
       return;
     }
     if (e.key === "ArrowDown" && !ta.value.slice(ta.selectionStart).includes("\n") && histPos.current >= 0) {
-      const h: string[] = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]");
+      const h: string[] = lsGet(HIST_KEY, "[]");
       e.preventDefault(); histPos.current--;
       setInput(histPos.current < 0 ? "" : h[h.length - 1 - histPos.current]);
       return;
@@ -851,22 +882,32 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       r.readAsDataURL(f);
     }
   };
-  const onPaste = (e: React.ClipboardEvent) => {
-    const t = e.clipboardData.getData("text/plain");
+  /** File paths in pasted text: file manager copies arrive as file:// URIs, GNOME's "x-special/nautilus-clipboard\ncopy\nfile://…", or plain absolute paths. */
+  const pathsIn = (raw: string) => {
+    const lines = raw.trim().split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !/^(x-special\/nautilus-clipboard|copy|cut)$/.test(l));
+    if (!lines.length || lines.length > 50 || !lines.every((l) => /^(file:\/\/|\/|~\/)\S/.test(l))) return null;
+    return lines.map((l) => (l.startsWith("file://") ? decodeURIComponent(l.replace(/^file:\/\/(localhost)?/, "")) : l));
+  };
+  /** Pasted text: file paths -> chips, long text -> chip, else typed into the composer at the caret. */
+  const pasteText = (t: string, insert: boolean) => {
+    const paths = pathsIn(t);
+    if (paths) return addPaths(paths);
     const lines = t.split("\n").length;
-    if (!e.clipboardData.files.length && (lines > PASTE_LINES || t.length > PASTE_CHARS)) {
-      e.preventDefault();
-      const ta = e.currentTarget as HTMLTextAreaElement;
-      const chip = `[Pasted text #${pastes.length + 1}: ${lines} lines] `;
-      setPastes((p) => [...p, t]);
-      setInput(ta.value.slice(0, ta.selectionStart) + chip + ta.value.slice(ta.selectionEnd));
-      return;
-    }
-    if (e.clipboardData.files.length) { e.preventDefault(); addImageFiles(e.clipboardData.files); }
+    if (lines > PASTE_LINES || t.length > PASTE_CHARS) return addPaste({ text: t, label: `${lines} lines` });
+    if (insert) { const ta = taRef.current; if (ta) { const a = ta.selectionStart, b = ta.selectionEnd; setInput((v) => v.slice(0, a) + t + v.slice(b)); } }
+  };
+  const onPaste = (e: React.ClipboardEvent) => {
+    const dt = e.clipboardData;
+    if (dt.files.length) { e.preventDefault(); addImageFiles(dt.files); return; }
+    const t = dt.getData("text/uri-list") || dt.getData("text/plain");
+    // Files copied in a file manager: WebKit hides the pasteboard from DataTransfer (no text, no files) but the default action would still
+    // insert the path. navigator.clipboard sees the real text, so route through that instead.
+    if (!t) { e.preventDefault(); navigator.clipboard.readText().then((c) => pasteText(c, true)).catch(warn); return; }
+    if (pathsIn(t) || t.split("\n").length > PASTE_LINES || t.length > PASTE_CHARS) { e.preventDefault(); pasteText(t, false); }
   };
 
   // Selection inside .msgs -> "Ask about this" button; remembers where (in .msgs content coords) to anchor the thread
-  const onMouseUp = (e: React.MouseEvent) => {
+  const onMouseUp = () => {
     if (compact) return;
     const sel = window.getSelection();
     const text = sel?.toString().trim();
@@ -874,26 +915,43 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     if (!text || !sel || !list || !list.contains(sel.anchorNode)) { setAsk(null); return; }
     const r = sel.getRangeAt(0).getBoundingClientRect();
     const lr = list.getBoundingClientRect();
-    setAsk({ x: e.clientX, y: e.clientY - 30, text, ax: r.right - lr.left + list.scrollLeft, ay: r.bottom - lr.top + list.scrollTop + 4 });
+    setAsk({ x: Math.min(r.left, window.innerWidth - 180), y: r.bottom + 4, text, ax: r.right - lr.left + list.scrollLeft, ay: r.bottom - lr.top + list.scrollTop + 4 });
   };
-  const openThread = () => {
+  useEffect(() => { // buttons follow the selection: any click elsewhere or key (menu, Ctrl+Shift+D overlay, scroll away) dismisses them
+    if (!ask) return;
+    const down = (e: Event) => { if (!(e.target as HTMLElement).closest?.(".ask-btns")) setAsk(null); };
+    const key = () => setAsk(null);
+    document.addEventListener("mousedown", down, true); document.addEventListener("keydown", key, true); document.addEventListener("scroll", key, true);
+    return () => { document.removeEventListener("mousedown", down, true); document.removeEventListener("keydown", key, true); document.removeEventListener("scroll", key, true); };
+  }, [!!ask]);
+  const openThread = (mark = false) => { // mark: just highlight the selection (bookmark), no session
     if (!ask) return;
     const id = crypto.randomUUID();
-    setThreads((t) => [...t, { id, ax: ask.ax, ay: ask.ay, quote: ask.text, resume: sessionId.current, open: true }].sort((a, b) => a.ay - b.ay));
-    setFront(id);
+    setThreads((t) => [...t, { id, ax: ask.ax, ay: ask.ay, quote: ask.text, resume: sessionId.current, open: !mark, mark }].sort((a, b) => a.ay - b.ay));
+    if (!mark) setFront(id);
     setAsk(null);
     window.getSelection()?.removeAllRanges();
   };
   const patchThread = (tid: string, p: Partial<Thread> | null) =>
     setThreads((t) => (p ? t.map((x) => (x.id === tid ? { ...x, ...p } : x)) : t.filter((x) => x.id !== tid)));
-  const toggleThread = (tid: string) => { setFront(tid); setThreads((t) => t.map((x) => (x.id === tid ? { ...x, open: !x.open } : x))); };
+  /** Scroll the list to a thread's quote (its painted position when found, else the anchor it was created at). */
+  const goToQuote = (t: Thread) => {
+    const l = listRef.current; if (!l) return;
+    const y = quoteBoxes.find((q) => q.id === t.id)?.dot.t ?? t.ay;
+    setAtBottom(false);
+    l.scrollTo({ top: Math.max(0, y - l.clientHeight / 3), behavior: "smooth" });
+  };
+  const toggleThread = (tid: string) => { // a mark has nothing to open: clicking it removes it
+    if (threads.find((x) => x.id === tid)?.mark) return patchThread(tid, null);
+    setFront(tid); setThreads((t) => t.map((x) => (x.id === tid ? { ...x, open: !x.open } : x)));
+  };
 
   // Open threads get a window at their anchor, following the scroll and clamped into the viewport. Closed ones are only their
   // highlighted quote (click to reopen); a closed thread mid-turn stays mounted but hidden so its process finishes.
   const lr = listRef.current?.getBoundingClientRect();
   const visible = !!lr && lr.width > 0; // hidden slot (terminal mode) -> no thread windows
   const top = lr?.top ?? 0, left = lr?.left ?? 0;
-  const placed = threads.filter((t) => t.open || threadBusy.current[t.id]).map((t) => ({
+  const placed = threads.filter((t) => !t.mark && (t.open || threadBusy.current[t.id])).map((t) => ({
     t, x: Math.min(left + t.ax, window.innerWidth - THREAD_W - 8), y: Math.max(top + 8, Math.min(top + t.ay - scrollTop, window.innerHeight - THREAD_H - 8)),
   }));
 
@@ -905,6 +963,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       else if (is(e, "prevMsg") || is(e, "nextMsg")) { stop(); jump(is(e, "nextMsg") ? 1 : -1); }
       else if (is(e, "scrollUp") || is(e, "scrollDown")) { const l = listRef.current; if (l) { stop(); setAtBottom(false); l.scrollBy({ top: (is(e, "scrollDown") ? 1 : -1) * l.clientHeight * 0.9 }); } }
       else if (is(e, "thread") && ask) { stop(); openThread(); } // thread from selection
+      else if (is(e, "mark") && ask) { stop(); openThread(true); } // bookmark the selection
       else if (is(e, "clear")) { stop(); post("/clear", []); }
       else if (is(e, "run")) { // a project's .x-term.json is untrusted content: show its command and ask before it touches the shell
         stop(); const cmd = runCmd.current || cfg.runCommand;
@@ -914,7 +973,15 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       }
     }}>
       <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll} onClick={(e) => { const t = e.target as HTMLElement; if (t.tagName === "IMG") setLightbox((t as HTMLImageElement).src); }}>
-        {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : <Row key={i} m={m} last={i === msgs.length - 1} acts={acts} />)}
+        {threads.length > 0 && listRef.current && (
+          <div className="ruler">
+            {threads.map((t) => {
+              const l = listRef.current!, y = quoteBoxes.find((q) => q.id === t.id)?.dot.t ?? t.ay;
+              return <span key={t.id} className={`ruler-mark ${threadCls(t)}`} style={{ top: (y / l.scrollHeight) * l.clientHeight }} title={t.quote} onMouseDown={(e) => e.preventDefault()} onClick={() => goToQuote(t)} />;
+            })}
+          </div>
+        )}
+        {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : <Row key={i} m={m} last={i === msgs.length - 1} stream={busy && i === msgs.length - 1} acts={acts} />)}
         {queue.map((q, i) => (
           <div key={`q${i}`} className="msg user queued" title="Sent when the current turn finishes">
             <span className="dim">queued · {SPIN[tick % SPIN.length]}</span> {q.text.slice(0, 300)}
@@ -922,18 +989,22 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         ))}
         {!atBottom && <button className="to-bottom" onClick={() => { setAtBottom(true); listRef.current?.scrollTo(0, listRef.current.scrollHeight); }}>↓</button>}
         {lightbox && createPortal(<div className="help" onClick={() => setLightbox("")}><img className="lightbox" src={lightbox} /></div>, document.body)}
-        {quoteBoxes.map(({ id, open, boxes, dot }) => (
+        {quoteBoxes.map(({ id, cls, boxes, dot }) => (
           <Fragment key={id}>
-            {boxes.map((b, i) => <span key={i} className="quote-hit" style={{ left: b.l, top: b.t, width: b.w, height: b.h }} onMouseDown={(e) => e.preventDefault()} onClick={() => toggleThread(id)} title={open ? "hide thread" : "show thread"} />)}
-            <span className={`quote-dot ${open ? "open" : ""}`} style={{ left: dot.l, top: dot.t }} onMouseDown={(e) => e.preventDefault()} onClick={() => toggleThread(id)} />
+            {boxes.map((b, i) => <span key={i} className="quote-hit" style={{ left: b.l, top: b.t, width: b.w, height: b.h }} onMouseDown={(e) => e.preventDefault()} onClick={() => toggleThread(id)} title={cls === "mark" ? "remove mark" : cls === "open" ? "hide thread" : "show thread"} />)}
+            <span className={`quote-dot ${cls}`} style={{ left: dot.l, top: dot.t }} onMouseDown={(e) => e.preventDefault()} onClick={() => toggleThread(id)} />
           </Fragment>
         ))}
-        {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>}
+        {ask && <span className="ask-btns" style={{ left: ask.x, top: ask.y }}>
+          <button className="ask-btn" onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>
+          <button className="ask-btn mark" onMouseDown={(e) => { e.preventDefault(); openThread(true); }} title={`bookmark this text (${label("mark")})`}>Mark</button>
+          <button className="ask-btn ctx" onMouseDown={(e) => { e.preventDefault(); pushContext(id, { text: ask.text, label: "selection" }); setAsk(null); window.getSelection()?.removeAllRanges(); }} title="add to the composer as a context chip">+ Context</button>
+        </span>}
       </div>
       {visible && placed.map(({ t, x, y }) => createPortal(
         <div key={t.id} className="thread" style={{ left: x, top: y, display: t.open ? undefined : "none", zIndex: t.id === front ? 1001 : 1000 }} onMouseDownCapture={() => setFront(t.id)}>
           <div className="thread-hdr" onClick={() => toggleThread(t.id)} title={t.quote}>
-            <span>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
+            <span className="thread-quote" title="scroll to this quote" onClick={(e) => { e.stopPropagation(); goToQuote(t); }}>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
             <span>
               <button onClick={(e) => { e.stopPropagation(); toggleThread(t.id); }}>hide</button>
               <button onClick={(e) => { e.stopPropagation(); mergeThread(t); }} title="Inject this thread's conversation into the main session" disabled={!threadMsgs.current[t.id]?.some((m) => m.role === "assistant")}>merge</button>
@@ -949,8 +1020,18 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         document.body,
       ))}
       <div className="composer">
-        {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => <span key={i} className="chip" title={p.slice(0, 500)} onClick={() => { setPastes((x) => x.filter((_, j) => j !== i)); setInput((v) => v.replace(new RegExp(`\\[Pasted text #${i + 1}[^\\]]*\\] ?`), "")); }}>#{i + 1}: {p.split("\n").length} lines ✕</span>)}</div>}
+        {quotes.map((q, i) => (
+          <div key={i} className="quote-chip" title="click to see all" onClick={() => setInspect({ text: q, label: "quote" })}>
+            <span className="q">{q}</span><span className="x" title="remove" onClick={(e) => { e.stopPropagation(); setQuotes((x) => x.filter((_, j) => j !== i)); }}>✕</span>
+          </div>
+        ))}
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} title="click to remove" onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
+        {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => (
+          <span key={i} className="chip" title="click to inspect" onClick={() => setInspect(p)}>
+            {p.label} <span className="x" title="remove" onClick={(e) => { e.stopPropagation(); setPastes(pastesRef.current.filter((_, j) => j !== i)); }}>✕</span>
+          </span>
+        ))}</div>}
+        {inspect && createPortal(<div className="help" onClick={() => setInspect(null)}><pre className="inspect">{inspect.text}</pre></div>, document.body)}
         {perm && plan !== null && (
           <div className="perm plan">
             <div className="perm-title">Plan ready · approve?</div>
@@ -1024,9 +1105,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             {Object.entries(tasks).map(([k, t]) => <li key={k} className={t.status}>{TASK_ICON[t.status] ?? "☐"} {t.subject}</li>)}
           </ul>
         )}
-        <div className="activity">
+        {(busy || turn.current.done) && <div className="activity">
           {busy ? <><span className="spin">{SPIN[tick % SPIN.length]}</span> {activity || "Thinking"}… <span className="dim">{fmtSec(Date.now() - turn.current.start)} · {turn.current.tools} tools · Esc to interrupt</span></> : <span className="dim">{turn.current.done}</span>}
-        </div>
+        </div>}
         <textarea
           ref={taRef}
           value={input}
@@ -1038,7 +1119,6 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         {!compact && (
           <>
             <div className="status">
-              <label className="attach" title="attach image"><input type="file" accept="image/*" multiple hidden onChange={(e) => { addImageFiles(e.target.files ?? []); e.target.value = ""; }} />📎</label>
               <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />
               {ctxPct >= 80 && <span className={`ctx-tag ${ctxPct >= 90 ? "crit" : ""}`} title="context used · /compact to shrink">ctx {ctxPct}%</span>}
               <span className="mode-tag" title="permission mode · Shift+Tab cycles">{mode}</span>

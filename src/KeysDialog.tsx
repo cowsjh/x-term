@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cfg } from "./config";
+import { useStatus } from "./Settings";
 import { DEFAULT_KEYS, DESC, Action } from "./keys";
 import { comboFromEvent, comboLabel, parseCombo } from "./keymatch";
 
 const ACTIONS = Object.keys(DEFAULT_KEYS) as Action[];
 
-/** Shortcut editor (titlebar ⌨ button). Click a combo, press the new keys; Save writes `keys` into config.json, which the
+/** Shortcut editor (Settings → keys). Click a combo, press the new keys; Save writes `keys` into config.json, which the
  *  Rust watcher reloads live. Only overrides that differ from the defaults are stored. */
 export function KeysDialog({ onClose }: { onClose: () => void }) {
   const [keys, setKeys] = useState<Record<string, string>>(() => ({ ...cfg.keys }));
   const [rec, setRec] = useState<Action | null>(null); // action currently being re-bound
-  const [err, setErr] = useState("");
+  const [st, status] = useStatus();
   const [saving, setSaving] = useState(false);
   const cur = (a: Action) => keys[a] || DEFAULT_KEYS[a];
   const dupes = useMemo(() => { // combo -> actions using it (conflicts shown in red; Alt+1..9 is a fixed chord)
@@ -37,18 +38,17 @@ export function KeysDialog({ onClose }: { onClose: () => void }) {
   const reset = (a: Action) => setKeys((k) => Object.fromEntries(Object.entries(k).filter(([x]) => x !== a)));
   const save = async () => {
     const bad = ACTIONS.find((a) => !parseCombo(cur(a)));
-    if (bad) return setErr(`${bad}: cannot parse "${cur(bad)}"`);
-    setSaving(true); setErr("");
+    if (bad) return status(`${bad}: cannot parse "${cur(bad)}"`, true);
+    setSaving(true);
     // null = delete the override from the file
     const patch: Record<string, string | null> = {};
     for (const a of ACTIONS) patch[a] = keys[a] && keys[a] !== DEFAULT_KEYS[a] ? keys[a] : null;
-    await invoke("save_config_patch", { patch: { keys: patch } }).then(onClose).catch((e) => setErr(String(e)));
+    await invoke("save_config_patch", { patch: { keys: patch } }).then(() => { cfg.keys = { ...keys }; setKeys({ ...keys }); status("saved"); }).catch((e) => status(String(e), true));
     setSaving(false);
   };
   return (
-    <div className="help" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="keys-dialog" onMouseDown={(e) => e.stopPropagation()}>
-        <h3>shortcuts <span className="dim">· click a key, press the new combination · Esc cancels · Alt+1…9 focus panes and cannot change</span></h3>
+    <>
+        <div className="keys-acts"><span className="dim">click a key, press the new combination · Esc cancels · Alt+1…9 focus panes and cannot change</span></div>
         <div className="keys-list">
           <table><tbody>
             {ACTIONS.map((x) => {
@@ -65,14 +65,13 @@ export function KeysDialog({ onClose }: { onClose: () => void }) {
             })}
           </tbody></table>
         </div>
-        {err && <div className="keys-err">{err}</div>}
+        {st && <div className={st === "saved" ? "keys-ok" : "keys-err"}>{st}</div>}
         <div className="keys-acts">
           <span className="dim">{[...dupes.values()].some((v) => v.length > 1) ? "⚠ conflicting combos are red: the first action in the list wins" : "stored in ~/.config/x-term/config.json → keys"}</span>
           <button onClick={() => setKeys({})} disabled={!Object.keys(keys).length}>reset all</button>
-          <button onClick={onClose}>cancel</button>
+          <button onClick={onClose}>close</button>
           <button className="primary" onClick={save} disabled={!dirty || saving}>save</button>
         </div>
-      </div>
-    </div>
+    </>
   );
 }

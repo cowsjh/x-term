@@ -12,7 +12,7 @@ export const DEFAULT_KEYS = {
   jumpPerm: "alt+p", jumpUnread: "alt+u", theme: "ctrl+shift+l", rename: "f2", config: "ctrl+,",
   zoomIn: "ctrl+=", zoomOut: "ctrl+-", zoomReset: "ctrl+0",
   // chat pane
-  find: "ctrl+f", changes: "ctrl+shift+d", focusComposer: "ctrl+l", retry: "ctrl+r", thread: "ctrl+shift+t",
+  find: "ctrl+f", changes: "ctrl+shift+d", focusComposer: "ctrl+l", retry: "ctrl+r", thread: "ctrl+shift+t", mark: "ctrl+shift+m",
   clear: "ctrl+shift+k", run: "ctrl+shift+r", prevMsg: "alt+pageup", nextMsg: "alt+pagedown", scrollUp: "shift+pageup", scrollDown: "shift+pagedown",
   // shell pane
   agentMode: "ctrl+a", termSearch: "ctrl+shift+f", termCopy: "ctrl+shift+c", termPaste: "ctrl+shift+v",
@@ -25,9 +25,9 @@ export const DESC: Record<Action, string> = {
   focusLeft: "focus pane left", focusRight: "focus pane right", focusUp: "focus pane up", focusDown: "focus pane down",
   moveLeft: "move pane left", moveRight: "move pane right", moveUp: "move pane up", moveDown: "move pane down",
   shrinkW: "pane narrower", growW: "pane wider", shrinkH: "pane shorter", growH: "pane taller",
-  jumpPerm: "next pane waiting for permission", jumpUnread: "next pane with an unread answer", theme: "toggle dark / light", rename: "rename pane", config: "open config.json in the editor",
+  jumpPerm: "next pane waiting for permission", jumpUnread: "next pane with an unread answer", theme: "toggle dark / light", rename: "rename pane", config: "settings (config, shortcuts, appearance)",
   zoomIn: "zoom in", zoomOut: "zoom out", zoomReset: "zoom reset",
-  find: "(chat) find in conversation", changes: "(chat) changes: git diff of the repo", focusComposer: "(chat) focus composer", retry: "(chat) retry last prompt", thread: "(chat) thread from selected text",
+  find: "(chat) find in conversation", changes: "(chat) changes: git diff of the repo", focusComposer: "(chat) focus composer", retry: "(chat) retry last prompt", thread: "(chat) thread from selected text", mark: "(chat) mark (bookmark) selected text",
   clear: "(chat) /clear", run: "(chat) run config runCommand in the shell", prevMsg: "(chat) previous user message", nextMsg: "(chat) next user message", scrollUp: "(chat) scroll up", scrollDown: "(chat) scroll down",
   agentMode: "(shell) switch to agent mode", termSearch: "(shell) search scrollback", termCopy: "(shell) copy selection", termPaste: "(shell) paste",
 };

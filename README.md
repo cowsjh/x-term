@@ -24,7 +24,7 @@
 - **Split panes, independent sessions** — every pane has its own shell (pty) and its own Claude Code session; `Ctrl+A` in the shell opens the chat there, `Ctrl+C` returns.
 - **Background agents** — ask for something big and Claude proposes a split; approve once and the agents run autonomously, each on its own git worktree. They stay off-screen; a bottom log strip shows each one's live status and activity, colour-coded (working / permission / error / done). Click a row to open or hide that agent's window; merge or remove worktrees from the sidebar.
 - **Permission cards** — tool approvals as cards, answered from the keyboard; desktop notification when the pane is not in front, `Alt+P` jumps to it. (Background agents run in bypass mode, so they never block on a prompt.)
-- **Real chat UI** — streaming markdown + KaTeX + mermaid diagrams, tool cards with diffs, image paste, `@file` completion, threads from selected text, git changes view, search and resume past sessions.
+- **Real chat UI** — streaming markdown + KaTeX + mermaid diagrams, tool cards with diffs, image paste, `@file` completion, threads and marks from selected text, shell selection / output → "Ask AI" or context chips, git changes view with click-to-quote review comments and a one-click Claude review, search and resume past sessions.
 - **Real terminal** — xterm.js on a pty; run `claude`, `codex`, `vim`, anything.
 - **Uses your login** — Claude runs as a `claude -p` process; no API keys, no extra billing.
 
@@ -68,7 +68,7 @@ x-term --fresh             # ignore the saved layout
 ## Configuration
 
 - `⌨ keys` in the title bar — edit shortcuts (click a combo, press new keys, save).
-- `⚙ config` — opens `~/.config/x-term/config.json`: theme, model, effort, fonts, notifications, shell, extra `claude` flags. Changes apply on save.
+- `⚙ settings` — config form, shortcut editor and palette editor (per-colour picker, live preview); all write `~/.config/x-term/config.json` (`colors.dark` / `colors.light` hold palette overrides). Extra keys such as `claudeArgs` or `shell` are edited in the file. Changes apply on save.
 - `<repo>/.x-term.json` — per-project model / effort / permission mode.
 
 ## How it works
