@@ -5,7 +5,7 @@ import { getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/ap
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { SessionParams } from "./SessionPane";
 import { Pane, PaneParams } from "./Pane";
-import { cfg, applyConfig, toggleTheme, Config } from "./config";
+import { cfg, applyConfig, toggleTheme, themeBase, Config } from "./config";
 import { invoke } from "@tauri-apps/api/core";
 import { busyPanes, agents, warn } from "./events";
 import { pickAgentModel, lsGet } from "./util";
@@ -187,7 +187,7 @@ const shortcuts = (): [string, string][] => [
   [`${label("termCopy")} / ${label("termPaste")} (shell)`, "copy selection / paste"],
   ["right-click", "pane menu (agent/terminal mode, find, export, close)"],
   [`${label("zoomIn")} / ${label("zoomOut")} / ${label("zoomReset")}`, "zoom in / out / reset"],
-  [label("theme"), "toggle dark / light"],
+  [label("theme"), "toggle light / dark (named theme ⇄ plain base)"],
   [label("config"), "open config.json in the editor (reloads on save)"],
   ["! cmd", "run in the pane's shell"],
   ["/search, /title, /resume, /config", "find past sessions, rename pane, pick a session, open config"],
@@ -406,7 +406,7 @@ export default function App() {
           </aside>
         )}
         <div className="dock">
-          <DockviewReact theme={theme === "light" ? themeLight : themeDark} components={components} onReady={onReady} />
+          <DockviewReact theme={themeBase(theme) === "light" ? themeLight : themeDark} components={components} onReady={onReady} />
         </div>
       </div>
       <AgentBar apiRef={apiRef} />

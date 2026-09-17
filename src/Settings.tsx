@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { cfg, DEFAULTS, Config, COLOR_VARS, PALETTE, applyConfig, paintColors, toggleTheme } from "./config";
+import { cfg, DEFAULTS, Config, COLOR_VARS, THEMES, applyConfig, paintColors } from "./config";
 import { KeysDialog } from "./KeysDialog";
 import { MODES, MODELS, EFFORTS, hex2hsv, hsv2hex } from "./util";
 
@@ -84,17 +84,17 @@ function ConfigTab({ onClose }: { onClose: () => void }) {
 const FieldRow = ({ f, children }: { f: Field; children: React.ReactNode }) => <><label title={f.hint}>{f.k}</label>{children}</>;
 
 /** Palette editor: one row per CSS var, native colour picker, live preview, per-colour reset. Overrides for the theme being
- *  edited are saved under `colors.<theme>`; the base values come from PALETTE. */
+ *  edited are saved under `colors.<theme>`; the base values come from THEMES. */
 function AppearanceTab({ onClose }: { onClose: () => void }) {
   const theme = cfg.theme;
-  const base = PALETTE[theme];
+  const base = THEMES[theme].colors;
   const [over, setOver] = useState<Record<string, string>>(() => ({ ...(cfg.colors[theme] ?? {}) }));
   const [st, status] = useStatus();
   const [wheel, setWheel] = useState(() => localStorage.getItem("x-term.picker") !== "system"); // swatch opens the hue wheel instead of the OS picker
   const [pop, setPop] = useState<{ v: string; x: number; y: number } | null>(null); // open wheel popover: var + anchor
-  const [font, setFont] = useState({ fontFamily: cfg.fontFamily, fontSize: cfg.fontSize });
-  const [themeDirty, setThemeDirty] = useState(false); // select switches live (toggleTheme); save writes it to the file
-  const fontDirty = font.fontFamily !== cfg.fontFamily || font.fontSize !== cfg.fontSize;
+  const [font, setFont] = useState({ fontFamily: cfg.fontFamily, fontSize: cfg.fontSize, textFontFamily: cfg.textFontFamily, textFontSize: cfg.textFontSize });
+  const [themeDirty, setThemeDirty] = useState(false); // select switches live; save writes it to the file
+  const fontDirty = (Object.keys(font) as (keyof typeof font)[]).some((k) => font[k] !== cfg[k]);
   const cur = (v: string) => over[v] ?? base[v];
   const raf = useRef(0);
   const paint = (o: Record<string, string>) => { // live preview; terminals repaint on x-term-config (one per frame while dragging the wheel)
@@ -106,7 +106,7 @@ function AppearanceTab({ onClose }: { onClose: () => void }) {
   const save = async () => {
     const colors = { ...cfg.colors, [theme]: over };
     if (!Object.keys(over).length) delete colors[theme];
-    const patch = { colors: Object.keys(colors).length ? colors : null, theme: theme === DEFAULTS.theme ? null : theme, fontFamily: font.fontFamily === DEFAULTS.fontFamily ? null : font.fontFamily, fontSize: font.fontSize === DEFAULTS.fontSize ? null : font.fontSize };
+    const patch = { colors: Object.keys(colors).length ? colors : null, theme: theme === DEFAULTS.theme ? null : theme, ...Object.fromEntries((Object.keys(font) as (keyof typeof font)[]).map((k) => [k, font[k] === DEFAULTS[k] ? null : font[k]])) };
     await invoke("save_config_patch", { patch }).then(() => {
       cfg.colors = colors; Object.assign(cfg, font); localStorage.removeItem("x-term.theme"); setThemeDirty(false); applyConfig(); setOver({ ...over }); status("saved");
     }).catch((e) => status(String(e), true));
@@ -114,9 +114,11 @@ function AppearanceTab({ onClose }: { onClose: () => void }) {
   return (
     <>
       <div className="cfg-form" style={{ flex: "none" }}>
-        <label>theme</label><select value={theme} onChange={() => { toggleTheme(); setThemeDirty(true); setOver({ ...(cfg.colors[cfg.theme] ?? {}) }); }}><option>dark</option><option>light</option></select>
+        <label>theme</label><select value={theme} onChange={(e) => { cfg.theme = e.target.value; localStorage.removeItem("x-term.theme"); applyConfig(); setThemeDirty(true); setOver({ ...(cfg.colors[cfg.theme] ?? {}) }); }}>{Object.keys(THEMES).map((n) => <option key={n}>{n}</option>)}</select>
         <label title="terminal + code font">fontFamily</label><input type="text" value={font.fontFamily} onChange={(e) => setFont({ ...font, fontFamily: e.target.value })} />
         <label>fontSize</label><input type="number" value={font.fontSize} onChange={(e) => setFont({ ...font, fontSize: Number(e.target.value) })} />
+        <label title="chat text font">textFontFamily</label><input type="text" value={font.textFontFamily} onChange={(e) => setFont({ ...font, textFontFamily: e.target.value })} />
+        <label>textFontSize</label><input type="number" value={font.textFontSize} onChange={(e) => setFont({ ...font, textFontSize: Number(e.target.value) })} />
       </div>
       <div className="keys-acts">
         <span className="dim">palette for <b>{theme}</b> · changes preview live · stored in config.json → colors.{theme}</span>
@@ -169,6 +171,8 @@ function Wheel({ hex, onChange }: { hex: string; onChange: (hex: string) => void
       <div className="wheel" onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); pick(e); }} onPointerMove={(e) => e.buttons && pick(e)}>
         <span className="wheel-dot" style={{ left: R + Math.sin(h * Math.PI / 180) * s * R, top: R - Math.cos(h * Math.PI / 180) * s * R, background: hex }} />
       </div>
+      <input type="range" min={0} max={360} value={Math.round(h)} title="hue" style={{ background: `linear-gradient(to right, ${[0, 60, 120, 180, 240, 300, 360].map((d) => hsv2hex(d, s, v)).join(", ")})` }} onChange={(e) => emit(+e.target.value, s, v)} />
+      <input type="range" min={0} max={100} value={Math.round(s * 100)} title="saturation" style={{ background: `linear-gradient(to right, ${hsv2hex(h, 0, v)}, ${hsv2hex(h, 1, v)})` }} onChange={(e) => emit(h, +e.target.value / 100, v)} />
       <input type="range" min={0} max={100} value={Math.round(v * 100)} title="brightness" style={{ background: `linear-gradient(to right, #000, ${hsv2hex(h, s, 1)})` }} onChange={(e) => emit(h, s, +e.target.value / 100)} />
       <span className="dim wheel-info">{hex} · h {String(Math.round(h)).padStart(3)}° s {String(Math.round(s * 100)).padStart(3)}% v {String(Math.round(v * 100)).padStart(3)}%</span>
     </>

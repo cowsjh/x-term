@@ -68,7 +68,7 @@ x-term --fresh             # ignore the saved layout
 ## Configuration
 
 - `⌨ keys` in the title bar — edit shortcuts (click a combo, press new keys, save).
-- `⚙ settings` — config form, shortcut editor and palette editor (per-colour picker, live preview); all write `~/.config/x-term/config.json` (`colors.dark` / `colors.light` hold palette overrides). Extra keys such as `claudeArgs` or `shell` are edited in the file. Changes apply on save.
+- `⚙ settings` — config form, shortcut editor and palette editor (per-colour picker, live preview); all write `~/.config/x-term/config.json` (`theme` picks dark, light or a named theme: Minimal Flexoki, Nord, Gruvbox, Catppuccin Mocha, Solarized Dark, Minimal, Solarized Light, Catppuccin Latte, Gruvbox Light; `colors.<theme>` holds palette overrides including `--h1`…`--h6` / `--bold`; `textFontFamily` / `textFontSize` set the chat text font). Extra keys such as `claudeArgs` or `shell` are edited in the file. Changes apply on save.
 - `<repo>/.x-term.json` — per-project model / effort / permission mode.
 
 ## How it works

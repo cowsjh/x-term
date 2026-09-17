@@ -9,10 +9,10 @@ import { onEvent, warn } from "./events";
 import { pushContext } from "./util";
 import "@xterm/xterm/css/xterm.css";
 import { Menu } from "./Menu";
-import { cfg, cssVar } from "./config";
+import { cfg, cssVar, themeBase } from "./config";
 import { is, isAppKey } from "./keys";
 
-const termTheme = () => ({ background: cssVar("--bg"), foreground: cssVar("--fg"), cursor: cssVar("--fg"), selectionBackground: cssVar(cfg.theme === "light" ? "--user-border" : "--accent") });
+const termTheme = () => ({ background: cssVar("--bg"), foreground: cssVar("--fg"), cursor: cssVar("--fg"), selectionBackground: cssVar(themeBase(cfg.theme) === "light" ? "--user-border" : "--accent") });
 
 /** A real shell in a pty (xterm.js). Run `claude`, `codex`, anything. Ctrl+A / right-click -> agent mode; `onExit` when the shell ends. */
 const OUTPUT_LINES = 50; // ponytail: "last output" = the last 50 non-empty scrollback lines; shell integration (OSC 133) would give the exact last command

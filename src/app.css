@@ -1,15 +1,15 @@
 /* Palette (dark, pre-JS fallback; the real palette is PALETTE in src/config.ts, overridable via `colors` in config.json). */
-:root { --bg: #1e1e1e; --bg0: #161616; --bg2: #262626; --bg3: #111; --bg4: #222; --fg: #ddd; --fg2: #ccc; --dim: #888; --dim2: #666; --border: #444; --border2: #333; --accent: #3b6ea5; --user: #2a3a55; --user-border: #446; --warn: #d7af00; --err-bg: #4a2020; }
+:root { --bg: #1e1e1e; --bg0: #161616; --bg2: #262626; --bg3: #111; --bg4: #222; --fg: #ddd; --fg2: #ccc; --dim: #888; --dim2: #666; --border: #444; --border2: #333; --accent: #3b6ea5; --user: #2a3a55; --user-border: #446; --user-fg: #ddd; --warn: #d7af00; --err-bg: #4a2020; }
 /* ponytail: code blocks (highlight.js github-dark-dimmed) stay dark in the light theme; swap the stylesheet per theme if it matters */
 [data-theme=light] .msg pre, [data-theme=light] .tool-res, [data-theme=light] .tool-in, [data-theme=light] .diff pre { background: #24292e; color: #ddd; }
-html, body, #root { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; }
+html, body, #root { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: var(--sans-size) / 1.5 var(--sans); }
 .pane { display: flex; flex-direction: column; height: 100%; }
 .msgs { flex: 1; overflow-y: auto; padding: 8px 12px; }
 .msg { margin: 6px 0; padding: 6px 10px; border-radius: 6px; white-space: normal; }
 .msg > :first-child, .msg > .msg-bar + * { margin-top: 0; } /* .msg-bar (absolute) is the first child, so the real first block needs the rule too */ .msg > :last-child { margin-bottom: 0; } /* browser default 1em p/blockquote margins made a hole between a quote and the text under it */
 .msg p { margin: 4px 0; }
 .msg blockquote { margin: 4px 0; padding: 2px 8px; border-left: 3px solid var(--accent); color: var(--fg2); }
-.msg.user { background: var(--user); }
+.msg.user { background: var(--user); color: var(--user-fg); padding: 15px; }
 .msg.assistant { background: var(--bg2); }
 .msg.tool { background: none; padding: 1px 10px; margin: 1px 0; font-family: ui-monospace, monospace; font-size: 12px; cursor: pointer; }
 .msg.tool.error { background: #3a2222; }
@@ -146,7 +146,7 @@ code.inline.copied { background: #2a5a2a; }
 .chip { display: inline-block; background: var(--user); border: 1px solid var(--user-border); border-radius: 10px; padding: 1px 8px; margin: 2px; font-size: 12px; cursor: pointer; }
 .chip .x { margin-left: 4px; color: var(--dim); } .chip .x:hover { color: var(--fg); }
 .quote-chip { display: flex; gap: 8px; align-items: flex-start; border-left: 3px solid var(--accent); background: var(--bg2); border-radius: 0 4px 4px 0; padding: 4px 8px; font-size: 12px; color: var(--fg2); cursor: pointer; }
-.quote-chip .q { flex: 1; white-space: pre-wrap; max-height: 3.6em; overflow: hidden; }
+.quote-chip .q { flex: 1; white-space: pre-wrap; max-height: 3.6em; overflow: auto; }
 .quote-chip .x { color: var(--dim); } .quote-chip .x:hover { color: var(--fg); }
 .inspect { max-width: 90vw; max-height: 90vh; overflow: auto; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; font: 12px ui-monospace, monospace; white-space: pre-wrap; }
 .ask-btn.ctx { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); }
@@ -214,7 +214,16 @@ code.inline.copied { background: #2a5a2a; }
 .pane-root[data-spawned] .pane-hdr.err { background: rgb(70, 26, 26); } .pane-root[data-spawned] .pane-hdr.err .log, .pane-root[data-spawned] .pane-hdr.err .st { color: rgb(255, 150, 150); font-weight: bold; }
 .pane-root[data-spawned] .pane-hdr.unread { background: rgb(20, 58, 30); } .pane-root[data-spawned] .pane-hdr.unread .log, .pane-root[data-spawned] .pane-hdr.unread .st { color: rgb(130, 226, 150); }
 /* config.json fontFamily / fontSize: terminal, code, tool cards, status line share the mono font */
-:root { --mono: ui-monospace, monospace; --mono-size: 13px; }
+:root { --mono: ui-monospace, monospace; --mono-size: 13px; --sans: system-ui, sans-serif; --sans-size: 14px; }
+/* config.json textFontFamily / textFontSize: chat text; heading + bold colours come from the palette (--h1..--h6, --bold) */
+.msg h1, .msg h2, .msg h3, .msg h4, .msg h5, .msg h6 { margin: 1.2em 0 .4em; line-height: 1.25; }
+.msg h1 { font-size: 2.125em; font-weight: 300; color: var(--h1); }
+.msg h2 { font-size: 1.4em; font-weight: 300; color: var(--h2); padding-bottom: .15em; border-bottom: 1px solid var(--border2); }
+.msg h3 { font-size: 1em; font-weight: 500; color: var(--h3); }
+.msg h4 { font-size: .9em; font-weight: 500; color: var(--h4); }
+.msg h5 { font-size: .85em; font-weight: 500; font-variant: small-caps; color: var(--h5); }
+.msg h6 { font-size: .85em; font-weight: 400; font-variant: small-caps; color: var(--h6); }
+.msg strong { color: var(--bold); }
 .msg code, .msg.tool, .tool-res, .tool-in, .diff pre, .changes, .status, .activity, .slash, .findbar, .toast { font-family: var(--mono); }
 .msg code { font-size: var(--mono-size); }
 .msg.tool, .tool-res, .tool-in, .status, .activity, .findbar, .toast, .changes { font-size: calc(var(--mono-size) - 1px); }

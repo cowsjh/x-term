@@ -68,7 +68,7 @@ x-term --fresh             # 저장된 레이아웃 무시
 ## 설정
 
 - 타이틀바 `⌨ keys` — 단축키 편집. 조합을 클릭하고 새 키를 누른 뒤 저장.
-- `⚙ settings` — 설정 폼, 단축키 편집, 색상 편집(항목별 컬러 피커, 실시간 미리보기). 모두 `~/.config/x-term/config.json`에 저장되며(`colors.dark` / `colors.light`에 팔레트 오버라이드) 저장 즉시 적용됩니다. `claudeArgs`, `shell` 같은 나머지 키는 파일에서 직접 편집합니다.
+- `⚙ settings` — 설정 폼, 단축키 편집, 색상 편집(항목별 컬러 피커, 실시간 미리보기). 모두 `~/.config/x-term/config.json`에 저장되며(`theme`은 dark, light 또는 이름 있는 테마: Minimal Flexoki, Nord, Gruvbox, Catppuccin Mocha, Solarized Dark, Minimal, Solarized Light, Catppuccin Latte, Gruvbox Light; `colors.<theme>`에 팔레트 오버라이드, `--h1`…`--h6` / `--bold` 포함; `textFontFamily` / `textFontSize`는 채팅 본문 글꼴) 저장 즉시 적용됩니다. `claudeArgs`, `shell` 같은 나머지 키는 파일에서 직접 편집합니다.
 - `<repo>/.x-term.json` — 프로젝트별 모델 / effort / 권한 모드.
 
 ## 동작 방식
