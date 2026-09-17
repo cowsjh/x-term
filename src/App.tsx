@@ -243,7 +243,11 @@ export default function App() {
     for (const p of [...e.api.panels]) if ((p.params as PaneParams | undefined)?.spawnedBy) p.api.close();
     // no group in the grid = a broken/empty restore (e.g. orphan panels with no layout): reset to a fresh pane instead of a dead window
     if (!e.api.groups.length) { localStorage.removeItem(LAYOUT_KEY); openPane(e.api, "term", {}); }
-    e.api.onDidRemovePanel((p) => localStorage.removeItem(`x-term.draft.${p.id}`)); // a closed pane's composer draft is unreachable: drop it
+    e.api.onDidRemovePanel((p) => {
+      localStorage.removeItem(`x-term.draft.${p.id}`); // a closed pane's composer draft is unreachable: drop it
+      // like a terminal emulator: closing the last pane leaves a fresh shell, never an empty window (which also loses keyboard focus, killing shortcuts)
+      if (!e.api.panels.length) openPane(e.api, "term", { cwd: (p.params as PaneParams | undefined)?.cwd });
+    });
     e.api.onDidLayoutChange(() => localStorage.setItem(LAYOUT_KEY, JSON.stringify(e.api.toJSON())));
   };
   const helpRef = useRef(false);
