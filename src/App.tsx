@@ -244,6 +244,22 @@ export default function App() {
     for (const p of [...e.api.panels]) if ((p.params as PaneParams | undefined)?.spawnedBy) p.api.close();
     // no group in the grid = a broken/empty restore (e.g. orphan panels with no layout): reset to a fresh pane instead of a dead window
     if (!e.api.groups.length) { localStorage.removeItem(LAYOUT_KEY); openPane(e.api, "term", {}); }
+    // one pane per group, always: the tab bar is hidden, so a group with two panels shows one and hides the other.
+    // Old layouts may still hold such groups (centre drops used to stack): spread them out. Empty groups are dead space: drop them.
+    const tidy = () => { for (const g of e.api.groups) { if (g.api.location.type !== "grid") continue; if (!g.panels.length) e.api.removeGroup(g); else for (const p of g.panels.slice(1)) p.api.moveTo({ group: g, position: "right" }); } };
+    tidy();
+    e.api.onDidMovePanel(() => setTimeout(tidy));
+    // terminator-style: dropping a pane onto the middle of another one swaps the two instead of stacking them
+    e.api.onWillDrop((ev) => {
+      const src = ev.getData(), dst = ev.group;
+      if (ev.position !== "center" || !src?.panelId || !dst) return;
+      ev.preventDefault();
+      const a = e.api.getPanel(src.panelId), b = dst.panels[0], ga = a?.group;
+      if (!a || !b || !ga || ga === dst) return;
+      // ponytail: dockview's public moveTo drops the emptied source group, so the swap goes through the component's keepEmptyGroups path
+      const core = (e.api as unknown as { component: { moveGroupOrPanel(o: object): void } }).component;
+      setTimeout(() => { core.moveGroupOrPanel({ from: { groupId: ga.id, panelId: a.id }, to: { group: dst, position: "center" }, keepEmptyGroups: true }); b.api.moveTo({ group: ga, position: "center", skipSetActive: true }); a.api.setActive(); });
+    });
     e.api.onDidRemovePanel((p) => {
       localStorage.removeItem(`x-term.draft.${p.id}`); // a closed pane's composer draft is unreachable: drop it
       // like a terminal emulator: closing the last pane leaves a fresh shell, never an empty window (which also loses keyboard focus, killing shortcuts)

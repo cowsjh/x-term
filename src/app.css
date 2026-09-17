@@ -168,7 +168,7 @@ code.inline.copied { background: #2a5a2a; }
 .msg.folded { max-height: 30vh; overflow: hidden; }
 .msg .more { display: block; position: absolute; left: 0; right: 0; bottom: 0; padding: 6px; background: linear-gradient(transparent, var(--bg2) 40%); color: var(--accent); border: none; cursor: pointer; font-size: 12px; }
 .lightbox { max-width: 95vw; max-height: 95vh; border-radius: 4px; }
-.pane-hdr { display: flex; gap: 8px; align-items: center; height: 18px; padding: 0 8px; background: var(--bg0); border-bottom: 1px solid var(--border2); font: 11px ui-monospace, monospace; color: var(--dim); white-space: nowrap; overflow: hidden; user-select: none; cursor: default; }
+.pane-hdr { display: flex; gap: 8px; align-items: center; height: 18px; padding: 0 8px; background: var(--bg0); border-bottom: 1px solid var(--border2); font: 11px ui-monospace, monospace; color: var(--dim); white-space: nowrap; overflow: hidden; user-select: none; cursor: grab; }
 .pane-hdr .n { color: var(--warn); }
 .pane-hdr .t { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--fg2); }
 .pane-hdr .cwd { color: var(--dim); }

@@ -60,7 +60,7 @@ export function TermPane({ id, cwd, onSwitch, onExit, onReady, onTitle, onClose 
       if (isAppKey(e)) return false; // window-level shortcuts (split, focus, sidebar …) never reach the shell
       if (is(e, "agentMode")) { if (e.type === "keydown") cb.current.onSwitch(); return false; }
       if (is(e, "termCopy")) { if (e.type === "keydown") navigator.clipboard.writeText(term.getSelection()); return false; }
-      if (is(e, "termPaste")) { if (e.type === "keydown") navigator.clipboard.readText().then((t) => term.paste(t)).catch(warn); return false; }
+      if (is(e, "termPaste")) { if (e.type === "keydown") { e.preventDefault(); navigator.clipboard.readText().then((t) => term.paste(t)).catch(warn); } return false; } // preventDefault: WebKitGTK maps Ctrl+Shift+V to native paste too; xterm listens for that paste event, so without it the text lands twice
       if (is(e, "termSearch")) { if (e.type === "keydown") { setSearch((s) => s ?? ""); setTimeout(() => (document.querySelector(`#tsearch-${id}`) as HTMLInputElement)?.select(), 0); } return false; }
       return true;
     });

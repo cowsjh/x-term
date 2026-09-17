@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IDockviewPanelProps } from "dockview-react";
+import { IDockviewPanelProps, LocalSelectionTransfer, PanelTransfer } from "dockview-react";
 import { invoke } from "@tauri-apps/api/core";
 import { warn, agents } from "./events";
 import { SessionPane, SessionParams } from "./SessionPane";
@@ -86,7 +86,12 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
   };
   return (
     <div className="pane-root" ref={root} data-id={api.id} data-mode={mode} data-spawned={params.spawnedBy ? "" : undefined}>
-      <div className={`pane-hdr ${mode === "term" ? "term" : status}`} onMouseDown={() => api.setActive()} onDoubleClick={() => setEditing((params.title ?? api.title ?? "").replace(/^● /, ""))} title={mode === "agent" ? agentCwd : params.cwd}>
+      <div className={`pane-hdr ${mode === "term" ? "term" : status}`} onMouseDown={() => api.setActive()}
+        // drag the header onto another pane (terminator-style): dockview's own drop overlays / move logic take it from here,
+        // it only needs the PanelTransfer that its (hidden) tab would have set
+        draggable={editing === null}
+        onDragStart={(e) => { LocalSelectionTransfer.getInstance().setData([new PanelTransfer(containerApi.id, api.group.id, api.id)], PanelTransfer.prototype); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", ""); }}
+        onDragEnd={() => LocalSelectionTransfer.getInstance().clearData(PanelTransfer.prototype)} onDoubleClick={() => setEditing((params.title ?? api.title ?? "").replace(/^● /, ""))} title={mode === "agent" ? agentCwd : params.cwd}>
         <span className="n">{n}</span>
         {editing !== null
           ? <input className="t" autoFocus value={editing} onChange={(e) => setEditing(e.target.value)} onBlur={commitTitle} onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") commitTitle(); if (e.key === "Escape") setEditing(null); }} />
