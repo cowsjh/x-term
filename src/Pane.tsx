@@ -7,7 +7,7 @@ import { TermPane } from "./TermPane";
 
 export type Mode = "term" | "agent";
 export type PaneStatus = "idle" | "busy" | "perm" | "unread" | "err";
-const STATUS_LABEL: Record<PaneStatus, string> = { idle: "claude", busy: "⏳ working", perm: "⚠ permission", unread: "● done", err: "✗ error" };
+const STATUS_LABEL: Record<PaneStatus, string> = { idle: "claude", busy: "working", perm: "permission", unread: "done", err: "error" };
 export type PaneParams = SessionParams & { mode?: Mode };
 const LAYOUT_KEY = "x-term.layout";
 

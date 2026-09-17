@@ -139,10 +139,11 @@ CSS.highlights.set("thread", HL.closed);
 CSS.highlights.set("thread-open", HL.open);
 CSS.highlights.set("mark", HL.mark);
 const unpaint = (r: Range) => { HL.closed.delete(r); HL.open.delete(r); HL.mark.delete(r); };
-/** Range covering `quote` inside `root`, matched with all whitespace removed (markdown rendering re-wraps it). First occurrence. */
-function findQuote(root: Node, quote: string): Range | null {
+/** Ranges covering every occurrence of `quote` inside `root`, matched with all whitespace removed (markdown rendering re-wraps it). */
+function findQuote(root: Node, quote: string): Range[] {
   const q = quote.replace(/\s+/g, "");
-  if (!q) return null;
+  const out: Range[] = [];
+  if (!q) return out;
   let text = "";
   const at: { node: Text; off: number }[] = []; // index in `text` -> position in the DOM
   const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -150,12 +151,13 @@ function findQuote(root: Node, quote: string): Range | null {
     if (n.parentElement?.closest(".msg-bar, button, textarea")) continue;
     for (let i = 0; i < n.data.length; i++) if (!/\s/.test(n.data[i])) { text += n.data[i]; at.push({ node: n, off: i }); }
   }
-  const i = text.indexOf(q);
-  if (i < 0) return null;
-  const r = document.createRange();
-  r.setStart(at[i].node, at[i].off);
-  r.setEnd(at[i + q.length - 1].node, at[i + q.length - 1].off + 1);
-  return r;
+  for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + 1)) {
+    const r = document.createRange();
+    r.setStart(at[i].node, at[i].off);
+    r.setEnd(at[i + q.length - 1].node, at[i + q.length - 1].off + 1);
+    out.push(r);
+  }
+  return out;
 }
 
 export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerminal, onStatus }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void; onEnd: () => void; onTerminal: (cmd: string) => void; onStatus: (s: PaneStatus) => void }) {
@@ -388,12 +390,15 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     quoteRanges.current = [];
     const lr = list?.getBoundingClientRect();
     const hits: typeof quoteBoxes = [];
+    const box = (b: DOMRect): Box => ({ l: b.left - lr!.left + list!.scrollLeft, t: b.top - lr!.top + list!.scrollTop, w: b.width, h: b.height });
     if (list && lr) for (const t of threads) {
-      const r = findQuote(list, t.quote);
-      if (!r) continue;
+      // same text may appear in several messages: take the occurrence nearest the anchor the selection was made at
+      const rs = findQuote(list, t.quote);
+      if (!rs.length) continue;
+      const dist = (r: Range) => { const b = box(r.getBoundingClientRect()); return Math.abs(b.t + b.h - t.ay); };
+      const r = rs.reduce((a, b) => (dist(b) < dist(a) ? b : a));
       (t.mark ? HL.mark : t.open ? HL.open : HL.closed).add(r);
       quoteRanges.current.push(r);
-      const box = (b: DOMRect): Box => ({ l: b.left - lr.left + list.scrollLeft, t: b.top - lr.top + list.scrollTop, w: b.width, h: b.height });
       const bb = box(r.getBoundingClientRect());
       hits.push({ id: t.id, cls: threadCls(t), boxes: [...r.getClientRects()].map(box), dot: { l: bb.l + bb.w, t: bb.t } });
     }
