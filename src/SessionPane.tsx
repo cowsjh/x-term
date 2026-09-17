@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { onEvent, warn, busyPanes, agents, AgentState } from "./events";
@@ -135,7 +135,28 @@ const BUILTINS = "x-term.builtinCommands"; // CLI reports slash_commands only af
 const DEFAULT_CTX = 200_000;
 const THREAD_W = 420;
 const THREAD_H = 380; // header + body; window is clamped so it never runs past the viewport bottom
-const THREAD_HDR = 30; // stacked (pinned) threads offset by this much
+// Thread quotes are painted with the CSS Custom Highlight API (no DOM edits under React): one shared registry per state, panes add/remove their own ranges.
+const HL = { closed: new Highlight(), open: new Highlight() };
+CSS.highlights.set("thread", HL.closed);
+CSS.highlights.set("thread-open", HL.open);
+/** Range covering `quote` inside `root`, matched with all whitespace removed (markdown rendering re-wraps it). First occurrence. */
+function findQuote(root: Node, quote: string): Range | null {
+  const q = quote.replace(/\s+/g, "");
+  if (!q) return null;
+  let text = "";
+  const at: { node: Text; off: number }[] = []; // index in `text` -> position in the DOM
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) {
+    if (n.parentElement?.closest(".msg-bar, button, textarea")) continue;
+    for (let i = 0; i < n.data.length; i++) if (!/\s/.test(n.data[i])) { text += n.data[i]; at.push({ node: n, off: i }); }
+  }
+  const i = text.indexOf(q);
+  if (i < 0) return null;
+  const r = document.createRange();
+  r.setStart(at[i].node, at[i].off);
+  r.setEnd(at[i + q.length - 1].node, at[i + q.length - 1].off + 1);
+  return r;
+}
 
 export function SessionPane({ api, containerApi, params, onSwitch, onEnd, onTerminal, onStatus }: IDockviewPanelProps<SessionParams> & { onSwitch: () => void; onEnd: () => void; onTerminal: (cmd: string) => void; onStatus: (s: PaneStatus) => void }) {
   const [unread, setUnread] = useState(false);
@@ -324,6 +345,29 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   }, [threads]);
   const switchThreads = (sid?: string) => { if (sid !== threadKey.current) { threadKey.current = sid; setThreads(loadThreads(sid)); } };
   const [scrollTop, setScrollTop] = useState(0); // re-render threads on scroll
+  const [front, setFront] = useState(""); // last clicked thread window: drawn above the others
+  const quoteRanges = useRef<Range[]>([]); // painted quote ranges, removed from the registry before repainting
+  // Transparent hit boxes over each quote's line boxes (in .msgs content coords): pointer cursor, no text selection, click toggles the window
+  type Box = { l: number; t: number; w: number; h: number };
+  const [quoteBoxes, setQuoteBoxes] = useState<{ id: string; open: boolean; boxes: Box[]; dot: { l: number; t: number } }[]>([]);
+  useEffect(() => { // paint quotes; re-run whenever the list content may have changed
+    const list = listRef.current;
+    for (const r of quoteRanges.current) { HL.closed.delete(r); HL.open.delete(r); }
+    quoteRanges.current = [];
+    const lr = list?.getBoundingClientRect();
+    const hits: typeof quoteBoxes = [];
+    if (list && lr) for (const t of threads) {
+      const r = findQuote(list, t.quote);
+      if (!r) continue;
+      (t.open ? HL.open : HL.closed).add(r);
+      quoteRanges.current.push(r);
+      const box = (b: DOMRect): Box => ({ l: b.left - lr.left + list.scrollLeft, t: b.top - lr.top + list.scrollTop, w: b.width, h: b.height });
+      const bb = box(r.getBoundingClientRect());
+      hits.push({ id: t.id, open: t.open, boxes: [...r.getClientRects()].map(box), dot: { l: bb.l + bb.w, t: bb.t } });
+    }
+    setQuoteBoxes(hits);
+  }, [threads, msgs, tick]);
+  useEffect(() => () => { for (const r of quoteRanges.current) { HL.closed.delete(r); HL.open.delete(r); } }, []);
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
   const lastText = useRef("");
   const lastCmd = useRef(""); // last slash command sent; re-run in the terminal if the CLI says it is interactive-only
@@ -834,24 +878,24 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   };
   const openThread = () => {
     if (!ask) return;
-    setThreads((t) => [...t, { id: crypto.randomUUID(), ax: ask.ax, ay: ask.ay, quote: ask.text, resume: sessionId.current, open: true }].sort((a, b) => a.ay - b.ay));
+    const id = crypto.randomUUID();
+    setThreads((t) => [...t, { id, ax: ask.ax, ay: ask.ay, quote: ask.text, resume: sessionId.current, open: true }].sort((a, b) => a.ay - b.ay));
+    setFront(id);
     setAsk(null);
     window.getSelection()?.removeAllRanges();
   };
   const patchThread = (tid: string, p: Partial<Thread> | null) =>
     setThreads((t) => (p ? t.map((x) => (x.id === tid ? { ...x, ...p } : x)) : t.filter((x) => x.id !== tid)));
+  const toggleThread = (tid: string) => { setFront(tid); setThreads((t) => t.map((x) => (x.id === tid ? { ...x, open: !x.open } : x))); };
 
-  // Viewport position per thread: follows its anchor while scrolling. Anchor above the list -> pinned at the top, stacked
-  // downward; anchor below -> pinned at the bottom, stacked upward (header only). Threads are kept sorted by anchor.
+  // Open threads get a window at their anchor, following the scroll and clamped into the viewport. Closed ones are only their
+  // highlighted quote (click to reopen); a closed thread mid-turn stays mounted but hidden so its process finishes.
   const lr = listRef.current?.getBoundingClientRect();
   const visible = !!lr && lr.width > 0; // hidden slot (terminal mode) -> no thread windows
-  const top = lr?.top ?? 0, left = lr?.left ?? 0, bottom = lr?.bottom ?? window.innerHeight;
-  const placed = threads.map((t) => ({ t, x: Math.min(left + t.ax, window.innerWidth - THREAD_W - 8), y: top + t.ay - scrollTop, showBody: t.open }));
-  let k = 0;
-  for (const p of placed) { const minY = top + 8 + k * THREAD_HDR; if (p.y < minY) { p.y = minY; k++; } }
-  k = 0;
-  for (const p of [...placed].reverse()) { const maxY = bottom - 8 - (k + 1) * THREAD_HDR; if (p.y > maxY) { p.y = maxY; p.showBody = false; k++; } }
-  for (const p of placed) if (p.showBody) p.y = Math.min(p.y, window.innerHeight - THREAD_H - 8);
+  const top = lr?.top ?? 0, left = lr?.left ?? 0;
+  const placed = threads.filter((t) => t.open || threadBusy.current[t.id]).map((t) => ({
+    t, x: Math.min(left + t.ax, window.innerWidth - THREAD_W - 8), y: Math.max(top + 8, Math.min(top + t.ay - scrollTop, window.innerHeight - THREAD_H - 8)),
+  }));
 
   return (
     <div className={`pane ${compact ? "compact" : ""}`} ref={rootRef} onKeyDownCapture={(e) => {
@@ -878,22 +922,28 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         ))}
         {!atBottom && <button className="to-bottom" onClick={() => { setAtBottom(true); listRef.current?.scrollTo(0, listRef.current.scrollHeight); }}>↓</button>}
         {lightbox && createPortal(<div className="help" onClick={() => setLightbox("")}><img className="lightbox" src={lightbox} /></div>, document.body)}
+        {quoteBoxes.map(({ id, open, boxes, dot }) => (
+          <Fragment key={id}>
+            {boxes.map((b, i) => <span key={i} className="quote-hit" style={{ left: b.l, top: b.t, width: b.w, height: b.h }} onMouseDown={(e) => e.preventDefault()} onClick={() => toggleThread(id)} title={open ? "hide thread" : "show thread"} />)}
+            <span className={`quote-dot ${open ? "open" : ""}`} style={{ left: dot.l, top: dot.t }} onMouseDown={(e) => e.preventDefault()} onClick={() => toggleThread(id)} />
+          </Fragment>
+        ))}
         {ask && <button className="ask-btn" style={{ left: ask.x, top: ask.y }} onMouseDown={(e) => { e.preventDefault(); openThread(); }}>Ask about this ↗</button>}
       </div>
-      {visible && placed.map(({ t, x, y, showBody }) => createPortal(
-        <div key={t.id} className={`thread ${showBody ? "" : "collapsed"}`} style={{ left: x, top: y }}>
-          <div className="thread-hdr" onClick={() => patchThread(t.id, { open: !t.open })} title={t.quote}>
+      {visible && placed.map(({ t, x, y }) => createPortal(
+        <div key={t.id} className="thread" style={{ left: x, top: y, display: t.open ? undefined : "none", zIndex: t.id === front ? 1001 : 1000 }} onMouseDownCapture={() => setFront(t.id)}>
+          <div className="thread-hdr" onClick={() => toggleThread(t.id)} title={t.quote}>
             <span>{t.quote.slice(0, 40)}{t.quote.length > 40 ? "…" : ""}</span>
             <span>
-              <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, { open: !t.open }); }}>{t.open ? "hide" : "show"}</button>
+              <button onClick={(e) => { e.stopPropagation(); toggleThread(t.id); }}>hide</button>
               <button onClick={(e) => { e.stopPropagation(); mergeThread(t); }} title="Inject this thread's conversation into the main session" disabled={!threadMsgs.current[t.id]?.some((m) => m.role === "assistant")}>merge</button>
               <button onClick={(e) => { e.stopPropagation(); patchThread(t.id, null); }}>close</button>
             </span>
           </div>
-          <div className="thread-body" style={{ display: showBody ? undefined : "none" }}>
-            {(showBody || threadBusy.current[t.id]) && <Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact
+          <div className="thread-body">
+            <Chat id={t.id} cwd={cwd} resume={t.sid ?? t.resume} fork={!t.sid} quote={t.sid ? undefined : t.quote} compact
               onState={(st) => { if (st.resume) patchThread(t.id, { sid: st.resume }); if (st.busy !== undefined) threadBusy.current[t.id] = st.busy; }}
-              onMsgs={(m) => { threadMsgs.current[t.id] = m; setTick((x) => x + 1); }} />}
+              onMsgs={(m) => { threadMsgs.current[t.id] = m; setTick((x) => x + 1); }} />
           </div>
         </div>,
         document.body,
