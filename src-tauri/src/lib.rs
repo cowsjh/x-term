@@ -5,7 +5,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 mod mcp;
 
@@ -125,15 +125,21 @@ fn start_session(
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
 
+    let pid = child.id();
     let (app2, id2) = (app.clone(), id.clone());
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let _ = app2.emit("session-event", SessionEvent { id: id2.clone(), line });
         }
-        let _ = app2.emit(
-            "session-event",
-            SessionEvent { id: id2, line: r#"{"type":"exit"}"#.into() },
-        );
+        // `exit` only for a process that died on its own: after stop_session (restart with --resume, mode change
+        // before the first message) the pane already listens under the same id for its replacement
+        let current = lock(&app2.state::<Sessions>().0).get(&id2).map(|s| s.child.id());
+        if current == Some(pid) {
+            let _ = app2.emit(
+                "session-event",
+                SessionEvent { id: id2, line: r#"{"type":"exit"}"#.into() },
+            );
+        }
     });
     let (app3, id3) = (app, id.clone());
     std::thread::spawn(move || {
@@ -457,6 +463,17 @@ fn cli_args() -> Vec<String> {
     std::env::args().skip(1).collect()
 }
 
+#[tauri::command]
+fn home_dir() -> String {
+    home()
+}
+
+/// Which of `paths` still exist (pins: a moved or deleted file is flagged and left out of the prompt).
+#[tauri::command(async)]
+fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    paths.iter().map(|p| std::path::Path::new(p).exists()).collect()
+}
+
 /// Emits `config-changed` with the fresh global config whenever the file's mtime changes (or it appears/disappears).
 fn watch_config(app: AppHandle) {
     std::thread::spawn(move || {
@@ -584,8 +601,8 @@ fn head_tail(path: &std::path::Path, n: u64) -> Option<(String, String)> {
 fn session_info(e: &std::fs::DirEntry) -> Option<SessionInfo> {
             let id = e.path().file_stem()?.to_string_lossy().into_owned();
             let mtime = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            // head for "has a real prompt", tail for the summary: transcripts can be tens of MB
-            let (head, tail) = head_tail(&e.path(), 64 * 1024)?;
+            // only the head: transcripts can be tens of MB
+            let (head, _) = head_tail(&e.path(), 64 * 1024)?;
             let parse = |t: &str| t.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect::<Vec<_>>();
             let lines = parse(&head);
             // stubs: sessions that only ran a local slash command (`/clear`, a typo) have no real user prompt
@@ -598,11 +615,16 @@ fn session_info(e: &std::fs::DirEntry) -> Option<SessionInfo> {
                 return None;
             }
             let cwd = lines.iter().find_map(|v| v["cwd"].as_str()).unwrap_or_default().to_string();
-            let tail_lines = parse(&tail);
-            let summary = tail_lines
+            // name = the first real prompt, so a session keeps its name as the conversation goes on
+            let summary = lines
                 .iter()
-                .filter_map(|v| v["lastPrompt"].as_str().or_else(|| v["message"]["content"].as_str()).map(|t| t.chars().take(80).collect::<String>()))
-                .last()
+                .filter(|v| v["type"] == "user" && v["isMeta"] != true)
+                .find_map(|v| match &v["message"]["content"] {
+                    serde_json::Value::String(t) if !t.starts_with('<') => Some(t.as_str()),
+                    serde_json::Value::Array(a) => a.iter().find_map(|b| b["text"].as_str().filter(|t| b["type"] == "text" && !t.starts_with('<'))),
+                    _ => None,
+                })
+                .map(|t| t.lines().next().unwrap_or("").chars().take(80).collect::<String>())
                 .unwrap_or_default();
             Some(SessionInfo { id, mtime, summary, cwd })
 }
@@ -833,9 +855,11 @@ struct TranscriptMsg {
     input: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ts: Option<String>, // record's ISO timestamp (hover time on resumed history)
 }
-fn tm(role: &str, text: String) -> TranscriptMsg {
-    TranscriptMsg { role: role.into(), text, id: None, input: None, error: None }
+fn tm(role: &str, text: String, ts: Option<String>) -> TranscriptMsg {
+    TranscriptMsg { role: role.into(), text, id: None, input: None, error: None, ts }
 }
 
 /// User/assistant text of a stored session, for showing history when resuming.
@@ -850,28 +874,30 @@ fn load_transcript(cwd: String, id: String) -> Vec<TranscriptMsg> {
             continue;
         }
         let content = &v["message"]["content"];
+        let ts = v["timestamp"].as_str().map(String::from);
         if let Some(t) = content.as_str() {
             if !t.starts_with('<') { // skip <command-name>/<local-command-caveat> bookkeeping records
-                out.push(tm(role, t.into()));
+                out.push(tm(role, t.into(), ts));
             }
             continue;
         }
         for b in content.as_array().into_iter().flatten() {
             match b["type"].as_str() {
-                Some("text") => out.push(tm(role, b["text"].as_str().unwrap_or("").into())),
+                Some("text") => out.push(tm(role, b["text"].as_str().unwrap_or("").into(), ts.clone())),
                 Some("tool_use") => out.push(TranscriptMsg {
                     role: "tool".into(),
                     text: b["name"].as_str().unwrap_or("").into(),
                     id: b["id"].as_str().map(String::from),
                     input: Some(b["input"].clone()),
                     error: None,
+                    ts: None,
                 }),
                 Some("tool_result") => {
                     let c = &b["content"];
                     let text = c.as_str().map(String::from).unwrap_or_else(|| {
                         c.as_array().into_iter().flatten().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n")
                     });
-                    out.push(TranscriptMsg { role: "tool_result".into(), text, id: b["tool_use_id"].as_str().map(String::from), input: None, error: b["is_error"].as_bool() });
+                    out.push(TranscriptMsg { role: "tool_result".into(), text, id: b["tool_use_id"].as_str().map(String::from), input: None, error: b["is_error"].as_bool(), ts: None });
                 }
                 _ => {}
             }
@@ -964,7 +990,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Sessions::default())
         .manage(Ptys::default())
-        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, save_export, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files, load_config, config_path, open_config, save_config_patch, cli_args, read_image, search_sessions, list_all_sessions, git_status, git_diff, git_worktree, git_worktree_list, git_worktree_merge, git_worktree_remove, open_in_editor, mcp::mcp_reply, log])
+        .invoke_handler(tauri::generate_handler![start_session, send_message, stop_session, write_line, run_statusline, save_export, pty_open, pty_write, pty_resize, pty_cwd, pty_close, initial_cwd, list_sessions, load_transcript, list_skills, list_files, load_config, config_path, open_config, save_config_patch, cli_args, home_dir, paths_exist, read_image, search_sessions, list_all_sessions, git_status, git_diff, git_worktree, git_worktree_list, git_worktree_merge, git_worktree_remove, open_in_editor, mcp::mcp_reply, log])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         // app.exit() and signal-driven shutdowns never destroy a window, so they need the same cleanup

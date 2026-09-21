@@ -92,7 +92,7 @@ function AppearanceTab({ onClose }: { onClose: () => void }) {
   const [st, status] = useStatus();
   const [wheel, setWheel] = useState(() => localStorage.getItem("x-term.picker") !== "system"); // swatch opens the hue wheel instead of the OS picker
   const [pop, setPop] = useState<{ v: string; x: number; y: number } | null>(null); // open wheel popover: var + anchor
-  const [font, setFont] = useState({ fontFamily: cfg.fontFamily, fontSize: cfg.fontSize, textFontFamily: cfg.textFontFamily, textFontSize: cfg.textFontSize });
+  const [font, setFont] = useState({ fontFamily: cfg.fontFamily, fontSize: cfg.fontSize, textFontFamily: cfg.textFontFamily, textFontSize: cfg.textFontSize, uiFontFamily: cfg.uiFontFamily, uiFontSize: cfg.uiFontSize });
   const [themeDirty, setThemeDirty] = useState(false); // select switches live; save writes it to the file
   const fontDirty = (Object.keys(font) as (keyof typeof font)[]).some((k) => font[k] !== cfg[k]);
   const cur = (v: string) => over[v] ?? base[v];
@@ -115,10 +115,12 @@ function AppearanceTab({ onClose }: { onClose: () => void }) {
     <>
       <div className="cfg-form" style={{ flex: "none" }}>
         <label>theme</label><select value={theme} onChange={(e) => { cfg.theme = e.target.value; localStorage.removeItem("x-term.theme"); applyConfig(); setThemeDirty(true); setOver({ ...(cfg.colors[cfg.theme] ?? {}) }); }}>{Object.keys(THEMES).map((n) => <option key={n}>{n}</option>)}</select>
-        <label title="terminal + code font">fontFamily</label><input type="text" value={font.fontFamily} onChange={(e) => setFont({ ...font, fontFamily: e.target.value })} />
-        <label>fontSize</label><input type="number" value={font.fontSize} onChange={(e) => setFont({ ...font, fontSize: Number(e.target.value) })} />
-        <label title="chat text font">textFontFamily</label><input type="text" value={font.textFontFamily} onChange={(e) => setFont({ ...font, textFontFamily: e.target.value })} />
-        <label>textFontSize</label><input type="number" value={font.textFontSize} onChange={(e) => setFont({ ...font, textFontSize: Number(e.target.value) })} />
+        <label title="pane headers, menus, lists, dialogs, activity and agent rows (uiFontFamily)">interface font</label><input type="text" value={font.uiFontFamily} onChange={(e) => setFont({ ...font, uiFontFamily: e.target.value })} />
+        <label>interface size</label><input type="number" value={font.uiFontSize} onChange={(e) => setFont({ ...font, uiFontSize: Number(e.target.value) })} />
+        <label title="chat messages and the composer (textFontFamily)">text font</label><input type="text" value={font.textFontFamily} onChange={(e) => setFont({ ...font, textFontFamily: e.target.value })} />
+        <label>text size</label><input type="number" value={font.textFontSize} onChange={(e) => setFont({ ...font, textFontSize: Number(e.target.value) })} />
+        <label title="terminal, code, tool cards, diffs, status line (fontFamily)">monospace font</label><input type="text" value={font.fontFamily} onChange={(e) => setFont({ ...font, fontFamily: e.target.value })} />
+        <label>monospace size</label><input type="number" value={font.fontSize} onChange={(e) => setFont({ ...font, fontSize: Number(e.target.value) })} />
       </div>
       <div className="keys-acts">
         <span className="dim">palette for <b>{theme}</b> · changes preview live · stored in config.json → colors.{theme}</span>

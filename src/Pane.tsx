@@ -1,9 +1,50 @@
 import { useEffect, useRef, useState } from "react";
-import { IDockviewPanelProps, LocalSelectionTransfer, PanelTransfer } from "dockview-react";
+import { DockviewApi, IDockviewPanelProps, LocalSelectionTransfer, PanelTransfer } from "dockview-react";
 import { invoke } from "@tauri-apps/api/core";
 import { warn, agents } from "./events";
 import { SessionPane, SessionParams } from "./SessionPane";
 import { TermPane } from "./TermPane";
+
+/** Foot of a pane that spawned agents: one row per child with live status colour + activity line. Click focuses its window (brings the floating pane to front); ✕ closes it.
+ *  Once the parent's turn ends with every child finished, all child windows close together. */
+function AgentBar({ api, parent }: { api: DockviewApi; parent: string }) {
+  const [rows, setRows] = useState<{ id: string; title: string; cls: string; log: string }[]>([]);
+  const [open, setOpen] = useState<Set<string>>(new Set()); // ids whose floating window is revealed
+  useEffect(() => {
+    const t = setInterval(() => {
+      const kids = [...agents.entries()].filter(([, a]) => a.spawnedBy === parent);
+      // parent's turn is over and every child has finished: the orchestrator has taken their answers, so tidy all the floating windows at once
+      if (kids.length && !agents.get(parent)?.busy && kids.every(([, a]) => !a.busy && !a.perm && (a.turns > 0 || a.err))) { for (const [id] of kids) api.getPanel(id)?.api.close(); return; }
+      setRows(kids.map(([id, a]) => ({
+      id,
+      title: api.getPanel(id)?.title ?? id.slice(0, 6),
+      cls: a.err ? "err" : a.perm ? "perm" : a.busy ? "busy" : a.unread ? "unread" : "idle",
+      log: a.busy ? a.activity : a.last?.split("\n")[0] ?? "",
+    })));
+    }, 500);
+    return () => clearInterval(t);
+  }, [parent]);
+  const toggle = (id: string) => setOpen((s) => {
+    const n = new Set(s); const show = !n.has(id); show ? n.add(id) : n.delete(id);
+    document.querySelector<HTMLElement>(`.pane-root[data-id="${id}"]`)?.classList.toggle("open", show);
+    if (show) api.getPanel(id)?.api.setActive();
+    return n;
+  });
+  if (!rows.length) return null;
+  return (
+    <div className="agent-bar">
+      {rows.map((r) => (
+        <div key={r.id} className={`agent-row ${r.cls} ${open.has(r.id) ? "shown" : ""}`} title={open.has(r.id) ? "click to hide window" : "click to open window"} onClick={() => toggle(r.id)}>
+          <span className="dot" />
+          <span className="t">↑ {r.title}</span>
+          <span className="log">{r.log || "idle"}</span>
+          <span className="eye">{open.has(r.id) ? "◱" : "▭"}</span>
+          <button title="terminate agent" onClick={(e) => { e.stopPropagation(); api.getPanel(r.id)?.api.close(); }}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export type Mode = "term" | "agent";
 export type PaneStatus = "idle" | "busy" | "perm" | "unread" | "err";
@@ -102,6 +143,7 @@ export function Pane(props: IDockviewPanelProps<PaneParams> & { initial: Mode })
       </div>
       {seen.term && <div className={`slot term ${mode === "term" ? "" : "hidden"}`}><TermPane key={termGen} id={api.id} cwd={params.cwd} onSwitch={() => switchTo("agent")} onExit={onExit} onReady={flush} onTitle={(t) => { if (mode === "term" && !params.title) api.setTitle(t); }} onClose={() => { if (!lastPane()) api.close(); }} /></div>}
       {seen.agent && <div className={`slot agent ${mode === "agent" ? "" : "hidden"}`}><SessionPane {...props} params={{ ...params, cwd: agentCwd }} onSwitch={() => switchTo("term")} onEnd={endAgent} onTerminal={runInTerm} onStatus={setStatus} /></div>}
+      {!params.spawnedBy && <AgentBar api={containerApi} parent={api.id} />}
     </div>
   );
 }

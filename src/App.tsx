@@ -75,7 +75,7 @@ async function handleMcp(api: DockviewApi, { id, pane, name, arguments: a }: Mcp
         const list: any[] = a.agents ?? [];
         if (list.length > MAX_AGENTS) throw new Error(`at most ${MAX_AGENTS} agents per call, got ${list.length}`);
         const out: { id: string; title: string; cwd: string; model: string; weight: string }[] = [];
-        // spawned agents run autonomously (auto mode) in hidden floating panes; the bottom AgentBar is the UI
+        // spawned agents run autonomously (auto mode) in hidden floating panes; the AgentBar at the foot of the parent pane is the UI
         const halfW = Math.floor((document.querySelector(".dock")?.clientWidth ?? window.innerWidth) / 2);
         let i = 0;
         for (const ag of list) {
@@ -116,41 +116,6 @@ const components = {
   session: (props: IDockviewPanelProps<PaneParams>) => <Pane {...props} initial="agent" />,
   term: (props: IDockviewPanelProps<PaneParams>) => <Pane {...props} initial="term" />,
 };
-
-/** CLI-style footer: one row per spawned agent with live status colour + activity line. Click focuses its window (brings the floating pane to front); ✕ closes it. */
-function AgentBar({ apiRef }: { apiRef: React.RefObject<DockviewApi | null> }) {
-  const [rows, setRows] = useState<{ id: string; title: string; cls: string; log: string }[]>([]);
-  const [open, setOpen] = useState<Set<string>>(new Set()); // ids whose floating window is revealed
-  useEffect(() => {
-    const t = setInterval(() => setRows([...agents.entries()].filter(([, a]) => a.spawnedBy).map(([id, a]) => ({
-      id,
-      title: apiRef.current?.getPanel(id)?.title ?? id.slice(0, 6),
-      cls: a.err ? "err" : a.perm ? "perm" : a.busy ? "busy" : a.unread ? "unread" : "idle",
-      log: a.busy ? a.activity : a.last?.split("\n")[0] ?? "",
-    }))), 500);
-    return () => clearInterval(t);
-  }, []);
-  const toggle = (id: string) => setOpen((s) => {
-    const n = new Set(s); const show = !n.has(id); show ? n.add(id) : n.delete(id);
-    document.querySelector<HTMLElement>(`.pane-root[data-id="${id}"]`)?.classList.toggle("open", show);
-    if (show) apiRef.current?.getPanel(id)?.api.setActive();
-    return n;
-  });
-  if (!rows.length) return null;
-  return (
-    <div className="agent-bar">
-      {rows.map((r) => (
-        <div key={r.id} className={`agent-row ${r.cls} ${open.has(r.id) ? "shown" : ""}`} title={open.has(r.id) ? "click to hide window" : "click to open window"} onClick={() => toggle(r.id)}>
-          <span className="dot" />
-          <span className="t">↑ {r.title}</span>
-          <span className="log">{r.log || "idle"}</span>
-          <span className="eye">{open.has(r.id) ? "◱" : "▭"}</span>
-          <button title="terminate agent" onClick={(e) => { e.stopPropagation(); apiRef.current?.getPanel(r.id)?.api.close(); }}>✕</button>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /** Help overlay rows; combos come from src/keys.ts (and the user's `keys` overrides), so build them when the overlay opens. */
 const shortcuts = (): [string, string][] => [
@@ -297,6 +262,19 @@ export default function App() {
         if (el?.dataset.mode === "agent" && !hasSel && !t?.closest(".thread")) { e.preventDefault(); el.dispatchEvent(new CustomEvent("x-term-ctrlc")); }
         return;
       }
+      // WebKitGTK moves the caret on Shift+Home / Shift+End instead of extending the selection: do it for every text field
+      // ourselves (logical line, not the wrapped visual line)
+      if ((e.key === "Home" || e.key === "End") && e.shiftKey && !e.ctrlKey && !e.altKey) {
+        const t = e.target;
+        if (t instanceof HTMLTextAreaElement || (t instanceof HTMLInputElement && /^(text|search|url|tel|password)$/.test(t.type))) {
+          e.preventDefault();
+          const v = t.value, a = t.selectionStart ?? 0, b = t.selectionEnd ?? 0, back = t.selectionDirection === "backward";
+          const caret = back ? a : b, anchor = back ? b : a;
+          const pos = e.key === "Home" ? v.lastIndexOf("\n", caret - 1) + 1 : (v.indexOf("\n", caret) + 1 || v.length + 1) - 1;
+          t.setSelectionRange(Math.min(anchor, pos), Math.max(anchor, pos), pos < anchor ? "backward" : "forward");
+        }
+        return;
+      }
       if (is(e, "sidebar")) { e.preventDefault(); setSide((s) => !s); return; }
       if (is(e, "theme")) { e.preventDefault(); toggleTheme(); return; }
       if (is(e, "config")) { e.preventDefault(); setSettings("config"); return; }
@@ -425,7 +403,6 @@ export default function App() {
           <DockviewReact theme={themeBase(theme) === "light" ? themeLight : themeDark} components={components} onReady={onReady} />
         </div>
       </div>
-      <AgentBar apiRef={apiRef} />
       {toast && <div className="toast app-toast">{toast}</div>}
       {settings && <Settings tab={settings} onClose={() => setSettings(null)} />}
       {help && (

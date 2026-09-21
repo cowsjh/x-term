@@ -40,12 +40,16 @@ export const DEFAULTS = {
   effort: "high",
   permissionMode: "acceptEdits",
   scrollback: 5000,
-  /** Terminal + code font. */
+  // Fonts, grouped like Obsidian: interface (chrome) / text (chat) / monospace (code + terminal)
+  /** Monospace: terminal, code, tool cards, diffs, status line. */
   fontFamily: "ui-monospace, monospace",
   fontSize: 13,
-  /** Chat text font (markdown, dialogs). */
+  /** Text: chat messages and the composer. */
   textFontFamily: "system-ui, sans-serif",
   textFontSize: 14,
+  /** Interface: pane headers, menus, lists, dialogs, activity / agent rows. */
+  uiFontFamily: "ui-monospace, monospace",
+  uiFontSize: 12,
   /** "enter" = Enter sends, Shift+Enter newline; "ctrl+enter" = Enter newline, Ctrl+Enter sends. */
   sendKey: "enter" as "enter" | "ctrl+enter",
   /** Desktop notifications: "all" (turn done + permission), "permission", "none". */
@@ -94,6 +98,8 @@ export function applyConfig(file?: Partial<Config>) {
   root.style.setProperty("--mono-size", `${cfg.fontSize}px`);
   root.style.setProperty("--sans", cfg.textFontFamily);
   root.style.setProperty("--sans-size", `${cfg.textFontSize}px`);
+  root.style.setProperty("--ui", cfg.uiFontFamily);
+  root.style.setProperty("--ui-size", `${cfg.uiFontSize}px`);
   window.dispatchEvent(new CustomEvent("x-term-config"));
 }
 

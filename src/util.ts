@@ -2,13 +2,13 @@
 import type { ToolMsg } from "./ToolCard";
 
 export type Img = { media_type: string; data: string };
-export type Msg = { role: "user" | "assistant" | "err" | "thinking" | "note"; text: string; images?: Img[]; tokens?: number; ts?: number } | ToolMsg; // note = grey divider (compaction, hints)
+export type Msg = { role: "user" | "assistant" | "err" | "thinking" | "note"; text: string; images?: Img[]; files?: string[]; tokens?: number; ts?: number } | ToolMsg; // note = grey divider (compaction, hints)
 export const MODES = ["auto", "acceptEdits", "manual", "plan", "bypassPermissions", "dontAsk"];
 // "" = CLI default. Before the first message these restart the process with --model/--effort; after, they are sent as /model and /effort.
 // Full ids: the CLI rejects short forms like `opus-4-8[1m]`; `[1m]` = 1M context variant.
 export const MODELS = ["claude-fable-5-1", "claude-fable-5-1[1m]", "claude-opus-5", "claude-opus-5[1m]", "claude-opus-4-8", "claude-opus-4-8[1m]", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-5[1m]", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-export type Hist = { role: string; text: string; id?: string; input?: any; error?: boolean };
+export type Hist = { role: string; text: string; id?: string; input?: any; error?: boolean; ts?: string };
 
 /** "claude-opus-4-8[1m]" -> "opus 4.8 [1m]", "claude-haiku-4-5-20251001" -> "haiku 4.5" */
 export const modelLabel = (id: string) => id.replace(/^claude-/, "").replace(/-(\d+)(?:-(\d+))?(?:-\d{8})?(\[1m\])?$/, (_, a, b, m) => ` ${a}${b ? "." + b : ""}${m ? " " + m : ""}`);
@@ -41,13 +41,26 @@ export const toMsgs = (hist: Hist[]): Msg[] => {
       const t = out.find((m) => m.role === "tool" && m.id === h.id) as ToolMsg | undefined;
       if (t) { t.result = h.text; t.error = !!h.error; }
     } else if (h.role === "tool") out.push({ role: "tool", id: h.id ?? crypto.randomUUID(), name: h.text, input: h.input ?? {}, text: h.text });
-    else out.push({ role: h.role as "user" | "assistant", text: h.text });
+    else {
+      const ts = h.ts ? Date.parse(h.ts) || undefined : undefined;
+      // the CLI records an Esc / Ctrl+C as a user record with this text: show it as the red interrupted block, not as a prompt
+      if (h.role === "user" && h.text.trim() === "[Request interrupted by user]") out.push({ role: "err", text: "interrupted", ts });
+      else out.push({ role: h.role as "user" | "assistant", text: h.text, ts });
+    }
   }
   return out;
 };
 
 /** A composer chip: `text` is what the model gets (appended after the typed text), `label` what the user sees. */
-export type Paste = { text: string; label: string };
+export type Paste = { text: string; label: string; path?: string };
+/** `@path` mention for the CLI. It splits mentions on whitespace, so a path with spaces goes quoted (`@"a b.txt"`); `\ ` escaping does not work. */
+export const atPath = (p: string) => (/\s/.test(p) ? `@"${p}"` : `@${p}`);
+/** Inverse of `atPath` for a sent prompt: whole-paragraph `@path` mentions (pins, attached files) come out as chips, the rest stays text. */
+export const splitAt = (t: string): [string[], string] => {
+  const at: string[] = [];
+  const rest = t.split("\n\n").filter((p) => { const m = /^@(?:"([^"]+)"|(\S+))$/.exec(p.trim()); if (m) at.push(m[1] ?? m[2]); return !m; });
+  return [at, rest.join("\n\n")];
+};
 
 /** Text handed to a pane's chat from outside it (shell selection / output, chat selection). `ask` = quote it in the composer;
  *  otherwise it becomes a context chip. Queued per pane id and drained by the chat on mount and on "x-term-context", so it

@@ -13,14 +13,17 @@ import { ToolCard, SubStep } from "./ToolCard";
 import { ansiToHtml } from "./ansi";
 import { Menu } from "./Menu";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { cfg, projectConfig } from "./config";
 import { is, label } from "./keys";
-import { Img, Msg, Hist, Paste, modelLabel, fmtTok, fmtSec, toMsgs, takeContext, pushContext, IMAGE_EXT, diffLines, diffStat, lsGet, mdBlocks, MODES, MODELS, EFFORTS } from "./util";
+import { Img, Msg, Hist, Paste, atPath, splitAt, modelLabel, fmtTok, fmtSec, toMsgs, takeContext, pushContext, IMAGE_EXT, diffLines, diffStat, lsGet, mdBlocks, MODES, MODELS, EFFORTS } from "./util";
 import type { PaneStatus } from "./Pane";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string; prompt?: string; spawnedBy?: string; model?: string; effort?: string }; // prompt: sent once the process is up (spawned agents); model/effort: per-pane override (spawn_agents weight)
 const DRAFT = (id: string) => `x-term.draft.${id}`; // composer text survives restarts; App drops it when the pane is closed
+let HOME = ""; invoke<string>("home_dir").then((h) => { HOME = h; }).catch(warn);
+const tilde = (p: string) => (HOME && (p === HOME || p.startsWith(`${HOME}/`)) ? `~${p.slice(HOME.length)}` : p); // display only
+const PINS = (id: string) => `x-term.pins.${id}`; // pinned file/folder paths: persist across turns, re-sent as @path each send so the CLI reads them fresh
 type Task = { subject: string; status: string };
 const TASK_ICON: Record<string, string> = { pending: "☐", in_progress: "◐", completed: "☑" };
 type SessionInfo = { id: string; mtime: number; summary: string; cwd?: string }; // cwd set for /search hits (other projects)
@@ -33,7 +36,7 @@ const HIST_KEY = "x-term.history"; // last 100 prompts, shared by all panes
 type Thread = { id: string; ax: number; ay: number; quote: string; resume?: string; sid?: string; open: boolean; mark?: boolean }; // mark = highlight only (bookmark), no session
 // Threads belong to a conversation: stored per main session id, swapped in/out together with it.
 const threadsKey = (sid: string) => `x-term.threads.${sid}`;
-const loadThreads = (sid?: string): Thread[] => (sid ? JSON.parse(localStorage.getItem(threadsKey(sid)) ?? "[]") : []);
+const loadThreads = (sid?: string): Thread[] => (sid ? lsGet(threadsKey(sid), "[]") : []);
 const THREAD_INDEX = "x-term.threads.index"; // insertion-ordered session ids; oldest thread sets are dropped past the cap
 const THREAD_CAP = 100;
 function touchThreadIndex(sid: string) {
@@ -102,20 +105,22 @@ const StreamMd = ({ text }: { text: string }) => <>{mdBlocks(text).map((b, i) =>
 const Row = memo(function Row({ m, last, stream, acts }: { m: Plain; last: boolean; stream?: boolean; acts: React.RefObject<RowActs> }) {
   const [open, setOpen] = useState(false);
   const fold = m.role === "assistant" && !last && !open && m.text.length > LONG;
+  const text = m.role === "user" ? splitAt(m.text)[1] : m.text; // pins / attached files stay out of the transcript view
   return (
     <div className={`msg ${m.role} ${fold ? "folded" : ""}`}>
-      {(m.role === "user" || m.role === "assistant") && (
+      {(m.role === "user" || m.role === "assistant" || (m.role === "err" && m.ts)) && (
         <span className="msg-bar">
-          {m.ts && <span className="dim">{new Date(m.ts).toLocaleTimeString()}</span>}
+          {m.ts && <span className="dim">{new Date(m.ts).toTimeString().slice(0, 5)}</span>}
           <button onClick={() => navigator.clipboard.writeText(m.text)} title="copy message">copy</button>
           {m.role === "user" && <button onClick={() => acts.current?.edit(m)} title="load into composer">edit</button>}
           {m.role === "user" && <button onClick={() => acts.current?.retry(m)} title="send again">retry</button>}
         </span>
       )}
       {m.images?.map((im, j) => <img key={j} src={`data:${im.media_type};base64,${im.data}`} title="click to enlarge" />)}
+      {m.role === "user" && m.files && m.files.length > 0 && <div className="thumbs">{m.files.map((f) => <span key={f} className="chip" title={`${f} — click to open`} onClick={() => invoke("open_in_editor", { path: f, line: null }).catch(warn)}>📄 {f.replace(/\/$/, "").replace(/^.*\//, "")}</span>)}</div>}
       {m.role === "err" || m.role === "note" ? m.text
         : m.role === "thinking" ? (m.text ? <details><summary>thinking</summary>{m.text}</details> : <span>thinking · ~{m.tokens ?? 0} tokens</span>)
-        : stream ? <StreamMd text={m.text} /> : <Markdown {...plugins}>{fold ? m.text.slice(0, LONG) : m.text}</Markdown>}
+        : stream ? <StreamMd text={text} /> : <Markdown {...plugins}>{fold ? text.slice(0, LONG) : text}</Markdown>}
       {fold && <button className="more" onClick={() => setOpen(true)}>show all ({m.text.length.toLocaleString()} chars)</button>}
     </div>
   );
@@ -309,21 +314,29 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const pastesRef = useRef(pastes); // synchronous mirror: several context items can arrive in one tick and each needs its own chip number
   const setPastes = (v: Paste[]) => { pastesRef.current = v; setPastesState(v); };
   const [inspect, setInspect] = useState<Paste | null>(null); // chip clicked: show exactly what the model will get
+  const [pins, setPinsState] = useState<string[]>(() => lsGet(PINS(id), "[]")); // absolute paths kept in view; the CLI re-reads them every turn
+  const setPins = (v: string[]) => { setPinsState(v); localStorage.setItem(PINS(id), JSON.stringify(v)); };
+  const pin = (p: string) => setPins(pins.includes(p) ? pins : [...pins, p]);
+  const [missing, setMissing] = useState<Set<string>>(new Set()); // pins whose path is gone (moved / deleted): shown red, not sent
+  const checkPins = async (ps: string[]) => { const ok = await invoke<boolean[]>("paths_exist", { paths: ps }).catch(() => ps.map(() => true)); const m = new Set(ps.filter((_, i) => !ok[i])); setMissing(m); return m; };
+  useEffect(() => { checkPins(pins); }, [pins]);
+  const browseFolder = async () => { const d = await open({ directory: true, defaultPath: cwd }); if (typeof d === "string") pin(d); }; // + button: native picker, folder as an @path pin
   const addPaste = (p: Paste) => setPastes([...pastesRef.current, p]); // everything pasted / dropped / added is a chip above the composer, never text in it
   /** Files by path (OS drop, file:// paste): images become thumbnails, the rest `@path` chips (the CLI reads them). */
   const addPaths = (paths: string[]) => {
     for (const p of paths) {
       if (IMAGE_EXT.test(p)) invoke<Img>("read_image", { path: p }).then((im) => setImages((x) => [...x, im])).catch(warn);
-      else addPaste({ text: `@${p}`, label: `📄 ${p.replace(/^.*\//, "")}` });
+      else addPaste({ text: atPath(p), label: `📄 ${p.replace(/^.*\//, "")}`, path: p });
     }
   };
   const [busy, setBusy] = useState(false);
   const live = useRef({ busy, onEnd }); // for the pane-level Ctrl+C listener (bound once)
   live.current = { busy, onEnd };
+  const interruptRef = useRef(() => {});
   useEffect(() => { // App dispatches x-term-ctrlc on the active .pane-root: like the CLI, interrupt a running turn, else end the session
     if (compact) return;
     const el = rootRef.current?.closest(".pane-root"); if (!el) return;
-    const h = () => { if (live.current.busy) { control({ subtype: "interrupt" }); setQueue([]); } else live.current.onEnd?.(); };
+    const h = () => { if (live.current.busy) interruptRef.current(); else live.current.onEnd?.(); };
     const send = (e: Event) => postRef.current((e as CustomEvent<string>).detail, []);
     const ctx = () => { takeContext(id).forEach((c) => ctxRef.current(c)); taRef.current?.focus(); };
     el.addEventListener("x-term-ctrlc", h); el.addEventListener("x-term-send", send); el.addEventListener("x-term-context", ctx);
@@ -335,7 +348,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     if (c.ask) setQuotes((q) => [...q, c.text]);
     else addPaste({ text: `${c.label}:\n\`\`\`\n${c.text}\n\`\`\``, label: `${c.label}, ${c.text.split("\n").length} lines` });
   };
-  const [queue, setQueue] = useState<{ text: string; images: Img[] }[]>([]); // prompts typed while a turn runs; sent one per result
+  const [queue, setQueue] = useState<{ text: string; images: Img[]; files?: string[] }[]>([]); // prompts typed while a turn runs; sent one per result
   const queueRef = useRef(queue);
   queueRef.current = queue;
   const [picks, setPicks] = useState<Record<string, string[]>>({}); // AskUserQuestion answers in progress
@@ -359,6 +372,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const [files, setFiles] = useState<string[]>([]); // @path completion
   const histPos = useRef(-1); // -1 = editing new input; otherwise index from the end of history
   const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { rootRef.current?.querySelector(".slash li.sel")?.scrollIntoView({ block: "nearest" }); }, [slashIdx]); // keyboard browsing follows the highlight
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
   useEffect(() => { onPerm?.(perm); }, [perm]);
@@ -415,6 +429,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const streaming = useRef("");
   const pendingText = useRef("");
   const raf = useRef(0);
+  // thinking deltas arrive per token (newer models: only estimated_tokens): fold them into the last thinking row once per frame
+  const think = useRef({ text: "", tokens: undefined as number | undefined });
+  const thinkRaf = useRef(0);
+  const flushThink = () => {
+    thinkRaf.current = 0;
+    const { text, tokens } = think.current;
+    if (!text && tokens === undefined) return;
+    think.current = { text: "", tokens: undefined };
+    setMsgs((m) => { const last = m[m.length - 1]; return last?.role === "thinking" ? [...m.slice(0, -1), { role: "thinking", text: last.text + text, tokens: tokens ?? last.tokens }] : m; });
+  };
   const listRef = useRef<HTMLDivElement>(null);
   const started = msgs.length > 0;
 
@@ -452,6 +476,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     setStatusHtml(out ? ansiToHtml(out) : `${modelLabel(i.model || model)} · ${effortRef.current} · ctx ${pct}% · $${i.cost.toFixed(3)}`);
   };
   const [ctxPct, setCtxPct] = useState(0);
+  const statusTimer = useRef(0);
+  /** Mid-turn refresh (usage per assistant message, rate-limit events): coalesced so the script runs at most ~once a second. */
+  const refreshSoon = () => { if (!statusTimer.current) statusTimer.current = window.setTimeout(() => { statusTimer.current = 0; refreshStatus(); }, 800); };
   useEffect(() => {
     if (!cwd) invoke<string>("initial_cwd").then(setCwd);
   }, []);
@@ -501,7 +528,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             onState?.({ cwd: ev.cwd, resume: ev.session_id });
             info.current = { ...info.current, model: ev.model, cwd: ev.cwd, commands: [...new Set([...info.current.commands, ...(ev.slash_commands ?? [])])].sort() };
             localStorage.setItem(BUILTINS, JSON.stringify(ev.slash_commands ?? []));
-            if (fork) localStorage.setItem(FORKS, JSON.stringify([...new Set([...lsGet(FORKS, "[]"), ev.session_id])].slice(-300)));
+            if (fork || spawned) localStorage.setItem(FORKS, JSON.stringify([...new Set([...lsGet(FORKS, "[]"), ev.session_id])].slice(-300))); // forks and spawned agents stay out of /resume
             refreshStatus();
           }
           break;
@@ -514,6 +541,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           break;
         case "rate_limit_event":
           info.current.rate = ev.rate_limit_info;
+          refreshSoon();
           break;
         case "control_request":
           if (ev.request?.subtype === "can_use_tool") setPerm({ request_id: ev.request_id, ...ev.request });
@@ -528,8 +556,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             setActivity("Thinking");
             setMsgs((m) => [...m, { role: "thinking", text: "" }]);
           } else if (d.type === "content_block_delta" && d.delta?.type === "thinking_delta") {
-            // newer models hide the text (only estimated_tokens + a signature arrive); keep the count so the row still says something
-            setMsgs((m) => { const last = m[m.length - 1]; return last?.role === "thinking" ? [...m.slice(0, -1), { role: "thinking", text: last.text + (d.delta.thinking ?? ""), tokens: d.delta.estimated_tokens ?? last.tokens }] : m; });
+            think.current.text += d.delta.thinking ?? "";
+            if (d.delta.estimated_tokens != null) think.current.tokens = d.delta.estimated_tokens;
+            if (!thinkRaf.current) thinkRaf.current = requestAnimationFrame(flushThink);
           } else if (d.type === "content_block_start" && d.content_block?.type === "tool_use") {
             streaming.current = "";
             const b = d.content_block;
@@ -543,6 +572,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             pendingText.current = streaming.current;
             if (!raf.current) raf.current = requestAnimationFrame(() => { raf.current = 0; setActivity("Writing"); setAssistant(pendingText.current); });
           } else if (d.type === "content_block_stop") {
+            if (thinkRaf.current) { cancelAnimationFrame(thinkRaf.current); flushThink(); } // before the next block lands and the thinking row is no longer last
             streaming.current = "";
           }
           break;
@@ -555,7 +585,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             }
             break;
           }
-          if (ev.message?.usage) info.current.usage = ev.message.usage;
+          if (ev.message?.usage) { info.current.usage = ev.message.usage; refreshSoon(); } // ctx % / cost move during the turn, like the CLI
           for (const b of ev.message?.content ?? []) {
             if (b.type === "thinking" && b.thinking) // when deltas were empty (hidden), the full block may still carry text
               setMsgs((m) => { const i = m.map((x) => x.role).lastIndexOf("thinking"); return i >= 0 && !(m[i] as any).text ? m.map((x, j) => (j === i ? { role: "thinking", text: b.thinking } : x)) : m; });
@@ -608,12 +638,21 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             turn.current.done = `${ev.is_error ? "✗" : "✓"} ${fmtSec(ev.duration_ms ?? Date.now() - turn.current.start)} · ${turn.current.tools} tools · ↑${fmtTok(tin)} ↓${fmtTok(u.output_tokens ?? 0)} · $${(ev.total_cost_usd ?? 0).toFixed(3)}`;
           }
           setActivity("");
-          onLive?.({ err: !!ev.is_error });
-          // budget / rate limit / API errors arrive only here (result text + errors[]), not as an assistant message
-          if (ev.is_error) { const why = [ev.result, ...(ev.errors ?? [])].filter((x) => typeof x === "string" && x && x !== lastText.current).join("\n"); if (why) setMsgs((m) => [...m, { role: "err", text: why }]); }
+          {
+            // an interrupted turn comes back as error_during_execution with only an "[ede_diagnostic] …" line: say so plainly
+            const errs = [ev.result, ...(ev.errors ?? [])].filter((x) => typeof x === "string" && x && x !== lastText.current) as string[];
+            const stopped = ev.subtype === "error_during_execution" && errs.every((x) => x.startsWith("[ede_diagnostic]"));
+            const byUser = stopped && interrupting.current;
+            onLive?.({ err: !!ev.is_error && !byUser });
+            // budget / rate limit / API errors arrive only here (result text + errors[]), not as an assistant message
+            if (byUser) setMsgs((m) => [...m, { role: "err", text: "interrupted", ts: Date.now() }]); // red like an error, with the reply-side hover bar (time / copy)
+            else if (stopped) setMsgs((m) => [...m, { role: "err", text: "turn stopped before a reply" }]);
+            else if (ev.is_error && errs.length) setMsgs((m) => [...m, { role: "err", text: errs.join("\n") }]);
+          }
+          interrupting.current = false;
           onState?.({ resume: ev.session_id, busy: false });
           onDone?.(lastText.current);
-          info.current.cost += ev.total_cost_usd ?? 0;
+          info.current.cost = ev.total_cost_usd ?? info.current.cost; // cumulative for the process, not per turn (adding it up again grew quadratically)
           // result.usage sums every API call of the turn, so context comes from the last assistant message (set above);
           // modelUsage carries the real context window size
           const mu = Object.values(ev.modelUsage ?? {}) as any[];
@@ -621,7 +660,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           if (cw) info.current.ctx = cw;
           refreshStatus();
           const next = queueRef.current[0];
-          if (next) { setQueue((q) => q.slice(1)); postRef.current(next.text, next.images, true); } else setBusy(false);
+          if (next) { setQueue((q) => q.slice(1)); postRef.current(next.text, next.images, true, next.files); } else setBusy(false);
           break;
         case "stderr":
           setMsgs((m) => [...m, { role: "err", text: ev.text }]);
@@ -648,7 +687,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       await invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: pm, model: m, effort: ef, name: title ?? null });
       const p = promptRef.current; if (p && alive) { promptRef.current = undefined; onState?.({ prompt: undefined }); postRef.current(p, []); }
     })().catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
-    return () => { alive = false; off(); if (raf.current) cancelAnimationFrame(raf.current); invoke("stop_session", { id }).catch(warn); };
+    return () => { alive = false; off(); if (raf.current) cancelAnimationFrame(raf.current); if (thinkRaf.current) cancelAnimationFrame(thinkRaf.current); clearTimeout(statusTimer.current); statusTimer.current = 0; invoke("stop_session", { id }).catch(warn); };
   }, [id, gen]);
 
   useEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
@@ -665,7 +704,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   }, [busy]);
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    setScrollTop(el.scrollTop);
+    if (threads.some((t) => !t.mark)) setScrollTop(el.scrollTop); // only thread windows follow the scroll; otherwise no re-render per scroll event
     setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
   };
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -677,6 +716,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     return () => clearTimeout(t);
   }, []);
 
+  const interrupting = useRef(false); // Esc / Ctrl+C sent: the CLI answers with an error_during_execution result, which is not an error to show
+  const interrupt = () => { interrupting.current = true; control({ subtype: "interrupt" }); setQueue([]); };
+  interruptRef.current = interrupt;
   const control = (request: object) =>
     invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(), request }) }).catch(warn);
   const answerPerm = (behavior: "allow" | "deny", always = false, updatedInput = perm?.input) => {
@@ -738,8 +780,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const send = async () => {
     const typed = input.trim();
     if (!typed && !images.length && !quotes.length) return;
+    const gone = pins.length ? await checkPins(pins) : missing;
     const text = typed.startsWith("/") || typed.startsWith("!") ? typed
-      : [...quotes.map((q) => `> ${q.replace(/\n/g, "\n> ")}`), typed, ...pastes.map((p) => p.text)].filter(Boolean).join("\n\n");
+      : [...pins.filter((p) => !gone.has(p)).map(atPath), ...quotes.map((q) => `> ${q.replace(/\n/g, "\n> ")}`), typed, ...pastes.map((p) => p.text)].filter(Boolean).join("\n\n");
     if (text.startsWith("!") && onTerminal) { setInput(""); onTerminal(text.slice(1)); return; } // like the CLI: `!cmd` runs in the shell
     const title = /^\/title\s+(.+)/.exec(text);
     if (title) { setInput(""); setSlash([]); onState?.({ title: title[1].trim().slice(0, 40) }); return; } // pane title (export name, notifications)
@@ -768,15 +811,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     }
     if (text) { const h: string[] = lsGet(HIST_KEY, "[]").filter((x: string) => x !== text); h.push(text); localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-100))); }
     histPos.current = -1;
+    const files = pastes.map((p) => p.path).filter((p): p is string => !!p);
     setInput(""); setImages([]); setPastes([]); setQuotes([]); setSlash([]);
-    post(text, images);
+    post(text, images, false, files);
   };
   /** Send now, or park in the queue while a turn is running (drained one per `result`). */
-  const post = (text: string, images: Img[], force = false) => {
-    if (busy && !force) { setQueue((q) => [...q, { text, images }]); return; }
+  const post = (text: string, images: Img[], force = false, files?: string[]) => {
+    if (busy && !force) { setQueue((q) => [...q, { text, images, files }]); return; }
     lastCmd.current = text.startsWith("/") ? text : "";
     if (!started && text) onState?.({ title: text.replace(/^>.*\n?/gm, "").trim().slice(0, 30) || text.slice(0, 30) });
-    setMsgs((m) => [...m, { role: "user", text, images, ts: Date.now() }]);
+    setMsgs((m) => [...m, { role: "user", text, images, files, ts: Date.now() }]);
     setBusy(true); setAtBottom(true);
     onState?.({ busy: true });
     onLive?.({ err: false }); // new turn clears any prior error state
@@ -787,7 +831,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const postRef = useRef(post); // the event listener closure is bound once per process; always call the latest post
   postRef.current = post;
   const acts = useRef<RowActs>({ edit: () => {}, retry: () => {} }); // stable ref so memoized rows never re-render for a new closure
-  acts.current = { edit: (m) => { setInput(m.text); taRef.current?.focus(); }, retry: (m) => post(m.text, m.images ?? []) };
+  acts.current = { edit: (m) => { setInput(m.text); taRef.current?.focus(); }, retry: (m) => post(m.text, m.images ?? [], false, m.files) };
   const [lightbox, setLightbox] = useState("");
   /** Alt+PgUp / Alt+PgDn: previous / next user message. */
   const jump = (dir: 1 | -1) => {
@@ -819,7 +863,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     setSlashIdx(0);
   };
   const fileTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const pickFile = (path: string) => { setInput((v) => v.replace(/@[^\s@]*$/, `@${path} `)); setFiles([]); taRef.current?.focus(); };
+  const pickFile = (path: string) => { setInput((v) => v.replace(/@[^\s@]*$/, `${atPath(path)} `)); setFiles([]); taRef.current?.focus(); };
   const ctrlEnter = cfg.sendKey === "ctrl+enter";
   const onKey = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return; // IME (Korean, Japanese …) still composing: Enter/arrows belong to the composer, not to us
@@ -874,9 +918,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       return;
     }
     if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); cycleMode(); return; }
-    if (is(e, "retry") && !compact) { e.preventDefault(); const last = [...msgs].reverse().find((m) => m.role === "user"); if (last && last.role === "user") post(last.text, last.images ?? []); return; }
+    if (is(e, "retry") && !compact) { e.preventDefault(); const last = [...msgs].reverse().find((m) => m.role === "user"); if (last && last.role === "user") post(last.text, last.images ?? [], false, last.files); return; }
     if (e.key === "Enter" && !e.shiftKey && !e.altKey && (ctrlEnter ? e.ctrlKey : !e.ctrlKey)) { e.preventDefault(); send(); }
-    if (e.key === "Escape" && busy) { control({ subtype: "interrupt" }); setQueue([]); }
+    if (e.key === "Escape" && busy) interrupt();
   };
 
   const addImageFiles = (files: Iterable<File>) => {
@@ -987,11 +1031,6 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           </div>
         )}
         {msgs.map((m, i) => m.role === "tool" ? <ToolCard key={m.id} m={m} /> : <Row key={i} m={m} last={i === msgs.length - 1} stream={busy && i === msgs.length - 1} acts={acts} />)}
-        {queue.map((q, i) => (
-          <div key={`q${i}`} className="msg user queued" title="Sent when the current turn finishes">
-            <span className="dim">queued · {SPIN[tick % SPIN.length]}</span> {q.text.slice(0, 300)}
-          </div>
-        ))}
         {!atBottom && <button className="to-bottom" onClick={() => { setAtBottom(true); listRef.current?.scrollTo(0, listRef.current.scrollHeight); }}>↓</button>}
         {lightbox && createPortal(<div className="help" onClick={() => setLightbox("")}><img className="lightbox" src={lightbox} /></div>, document.body)}
         {quoteBoxes.map(({ id, cls, boxes, dot }) => (
@@ -1031,11 +1070,6 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           </div>
         ))}
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} title="click to remove" onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
-        {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => (
-          <span key={i} className="chip" title="click to inspect" onClick={() => setInspect(p)}>
-            {p.label} <span className="x" title="remove" onClick={(e) => { e.stopPropagation(); setPastes(pastesRef.current.filter((_, j) => j !== i)); }}>✕</span>
-          </span>
-        ))}</div>}
         {inspect && createPortal(<div className="help" onClick={() => setInspect(null)}><pre className="inspect">{inspect.text}</pre></div>, document.body)}
         {perm && plan !== null && (
           <div className="perm plan">
@@ -1110,9 +1144,19 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             {Object.entries(tasks).map(([k, t]) => <li key={k} className={t.status}>{TASK_ICON[t.status] ?? "☐"} {t.subject}</li>)}
           </ul>
         )}
+        {queue.map((q, i) => (
+          <div key={`q${i}`} className="queued" title="Sent when the current turn finishes">
+            <span className="dim">queued ·</span> {q.text.slice(0, 300)}
+          </div>
+        ))}
         {(busy || turn.current.done) && <div className="activity">
           {busy ? <><span className="spin">{SPIN[tick % SPIN.length]}</span> {activity || "Thinking"}… <span className="dim">{fmtSec(Date.now() - turn.current.start)} · {turn.current.tools} tools · Esc to interrupt</span></> : <span className="dim">{turn.current.done}</span>}
         </div>}
+        {pastes.length > 0 && <div className="thumbs">{pastes.map((p, i) => (
+          <span key={i} className="chip" title="click to inspect" onClick={() => setInspect(p)}>
+            {p.path && <span className="pin-btn" title="pin (keep across turns)" onClick={(e) => { e.stopPropagation(); pin(p.path!); setPastes(pastesRef.current.filter((_, j) => j !== i)); }}>+</span>}{p.label} <span className="x" title="remove" onClick={(e) => { e.stopPropagation(); setPastes(pastesRef.current.filter((_, j) => j !== i)); }}>✕</span>
+          </span>
+        ))}</div>}
         <textarea
           ref={taRef}
           value={input}
@@ -1123,10 +1167,18 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         />
         {!compact && (
           <>
+        {pins.length > 0 && <div className="thumbs pin-row">
+          {pins.map((p, i) => (
+            <span key={i} className={`pin ${missing.has(p) ? "missing" : ""}`} title={missing.has(p) ? "moved or deleted: not sent" : "click to open"} onClick={() => invoke("open_in_editor", { path: p, line: null }).catch(warn)}>
+              <span className="p">{tilde(p)}</span> <span className="x" title="unpin" onClick={(e) => { e.stopPropagation(); setPins(pins.filter((_, j) => j !== i)); }}>✕</span>
+            </span>
+          ))}
+        </div>}
             <div className="status">
               <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />
               {ctxPct >= 80 && <span className={`ctx-tag ${ctxPct >= 90 ? "crit" : ""}`} title="context used · /compact to shrink">ctx {ctxPct}%</span>}
               <span className="mode-tag" title="permission mode · Shift+Tab cycles">{mode}</span>
+              <button className="browse" title="pin a folder (browse)" onClick={browseFolder}>+</button>
             </div>
           </>
         )}
