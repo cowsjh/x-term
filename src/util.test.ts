@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { modelLabel, toMsgs, fmtTok, pickAgentModel, diffLines, diffStat, mdBlocks, hex2hsv, hsv2hex } from "./util.ts";
+import { modelLabel, toMsgs, fmtTok, pickAgentModel, diffLines, diffStat, mdBlocks, hex2hsv, hsv2hex, mcpGroups, mcpLabel, mcpToolName, mcpAnnotations, type McpServer } from "./util.ts";
 
 test("modelLabel", () => {
   assert.equal(modelLabel("claude-opus-4-8[1m]"), "opus 4.8 [1m]");
@@ -43,4 +43,25 @@ test("hex <-> hsv round trip", () => {
   assert.deepEqual(hex2hsv("#00ff00"), [120, 1, 1]);
   assert.equal(hsv2hex(240, 1, 1), "#0000ff");
   for (const h of ["#3b6ea5", "#1e1e1e", "#d7af00", "#fafafa", "#000000"]) assert.equal(hsv2hex(...hex2hsv(h)), h);
+});
+test("mcp groups, labels, tool names", () => {
+  const list: McpServer[] = [
+    { name: "x-term", status: "connected" },
+    { name: "serena", status: "connected", scope: "user", tools: [{ name: "find_symbol", annotations: { readOnly: true } }] },
+    { name: "claude.ai Gmail", status: "pending", scope: "claudeai" },
+    { name: "headroom", status: "failed", scope: "user", error: "boom" },
+    { name: "plugin:design:figma", status: "needs-auth", source: "plugin" },
+    { name: "plugin:data:snowflake", status: "failed", source: "plugin" },
+    { name: "plugin:context7:context7", status: "disabled", source: "plugin" },
+  ];
+  const g = mcpGroups(list);
+  assert.deepEqual(Object.fromEntries(Object.entries(g).map(([k, v]) => [k, v.map((s) => s.name)])), {
+    active: ["serena", "claude.ai Gmail"], attention: ["headroom"], off: ["plugin:context7:context7"], signin: ["plugin:design:figma"], unavailable: ["plugin:data:snowflake"],
+  });
+  assert.deepEqual(mcpLabel(list[4]), { name: "figma", tag: "design" });
+  assert.deepEqual(mcpLabel(list[2]), { name: "Gmail", tag: "claude.ai" });
+  assert.deepEqual(mcpLabel(list[1]), { name: "serena", tag: "user" });
+  assert.equal(mcpToolName("claude.ai Gmail", "search_threads"), "mcp__claude_ai_Gmail__search_threads");
+  assert.equal(mcpToolName("plugin:context7:context7", "query-docs"), "mcp__plugin_context7_context7__query-docs");
+  assert.deepEqual(mcpAnnotations(list, "mcp__serena__find_symbol"), { readOnly: true });
 });

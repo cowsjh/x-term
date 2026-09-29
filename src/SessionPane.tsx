@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { onEvent, warn, busyPanes, agents, AgentState } from "./events";
@@ -16,7 +16,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { cfg, projectConfig } from "./config";
 import { is, label } from "./keys";
-import { Img, Msg, Hist, Paste, atPath, splitAt, modelLabel, fmtTok, fmtSec, toMsgs, takeContext, pushContext, IMAGE_EXT, diffLines, diffStat, lsGet, mdBlocks, MODES, MODELS, EFFORTS } from "./util";
+import { Img, Msg, Hist, Paste, atPath, splitAt, modelLabel, fmtTok, fmtSec, toMsgs, takeContext, pushContext, IMAGE_EXT, diffLines, diffStat, lsGet, mdBlocks, MODES, MODELS, EFFORTS, McpServer, mcpAnnotations } from "./util";
+import { McpBadge, McpPanel, ElicitCard, Elicitation } from "./McpPanel";
 import type { PaneStatus } from "./Pane";
 
 export type SessionParams = { title?: string; resume?: string; fork?: boolean; quote?: string; cwd?: string; prompt?: string; spawnedBy?: string; model?: string; effort?: string }; // prompt: sent once the process is up (spawned agents); model/effort: per-pane override (spawn_agents weight)
@@ -375,6 +376,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   useEffect(() => { rootRef.current?.querySelector(".slash li.sel")?.scrollIntoView({ block: "nearest" }); }, [slashIdx]); // keyboard browsing follows the highlight
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null); // /resume picker
   const [perm, setPerm] = useState<Perm | null>(null); // pending can_use_tool prompt
+  const [elicit, setElicit] = useState<Elicitation | null>(null); // an MCP server asks the user for input
+  const [mcp, setMcp] = useState<McpServer[] | null>(null); // last mcp_status answer
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const mcpPoll = useRef({ gen: 0, timer: 0, live: false }); // one status poll at a time; a newer one supersedes the older
   useEffect(() => { onPerm?.(perm); }, [perm]);
   const [mode, setMode] = useState(spawned ? "bypassPermissions" : (localStorage.getItem(MODE_KEY) ?? cfg.permissionMode)); // spawned agents run autonomously: no human at the pane to answer prompts, so never block on can_use_tool
   const [model, setModel] = useState(modelProp || localStorage.getItem("x-term.model") || cfg.model);
@@ -422,6 +427,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   }, [threads, msgs, layout]);
   useEffect(() => () => quoteRanges.current.forEach(unpaint), []);
   const [atBottom, setAtBottom] = useState(true); // auto-scroll only while the user is at the bottom
+  const lastTop = useRef(0);
+  const stick = useRef(true); stick.current = atBottom; // for the list ResizeObserver, set up once
   const lastText = useRef("");
   const lastCmd = useRef(""); // last slash command sent; re-run in the terminal if the CLI says it is interactive-only
   const sessionId = useRef<string | undefined>(resumeProp);
@@ -545,10 +552,16 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           break;
         case "control_request":
           if (ev.request?.subtype === "can_use_tool") setPerm({ request_id: ev.request_id, ...ev.request });
+          if (ev.request?.subtype === "elicitation") setElicit({ request_id: ev.request_id, ...ev.request });
           break;
-        case "control_response":
-          if (ev.response?.subtype === "error") setMsgs((m) => [...m, { role: "err", text: ev.response.error }]);
+        case "control_response": {
+          const a = asks.current.get(ev.response?.request_id);
+          if (a) { // answer to an `ask`: the caller shows its own error
+            asks.current.delete(ev.response.request_id);
+            if (ev.response.subtype === "error") a.no(new Error(ev.response.error)); else a.ok(ev.response.response);
+          } else if (ev.response?.subtype === "error") setMsgs((m) => [...m, { role: "err", text: ev.response.error }]);
           break;
+        }
         case "stream_event": {
           if (ev.parent_tool_use_id) break; // sub-agent stream: its full messages are attached to the Agent card instead
           const d = ev.event;
@@ -659,6 +672,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           const cw = Math.max(0, ...mu.map((m) => m?.contextWindow ?? 0));
           if (cw) info.current.ctx = cw;
           refreshStatus();
+          if (!compact && !mcpPoll.current.live) refreshMcp(); // a server can drop mid-session; keep the badge honest (never cut a sign-in poll short)
           const next = queueRef.current[0];
           if (next) { setQueue((q) => q.slice(1)); postRef.current(next.text, next.images, true, next.files); } else setBusy(false);
           break;
@@ -666,6 +680,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
           setMsgs((m) => [...m, { role: "err", text: ev.text }]);
           break;
         case "exit":
+          dropAsks();
           setBusy(false);
           setActivity("");
           setStatusHtml("exited");
@@ -685,16 +700,18 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       }
       if (!alive) return;
       await invoke("start_session", { id, cwd, resume: sessionId.current ?? null, fork: !!fork, permissionMode: pm, model: m, effort: ef, name: title ?? null });
+      if (!compact && alive) refreshMcp(10_000); // claude.ai connectors join the list a few seconds after start
       const p = promptRef.current; if (p && alive) { promptRef.current = undefined; onState?.({ prompt: undefined }); postRef.current(p, []); }
     })().catch((e) => alive && setMsgs((m) => [...m, { role: "err", text: String(e) }]));
-    return () => { alive = false; off(); if (raf.current) cancelAnimationFrame(raf.current); if (thinkRaf.current) cancelAnimationFrame(thinkRaf.current); clearTimeout(statusTimer.current); statusTimer.current = 0; invoke("stop_session", { id }).catch(warn); };
+    return () => { alive = false; off(); dropAsks(); setElicit(null); if (raf.current) cancelAnimationFrame(raf.current); if (thinkRaf.current) cancelAnimationFrame(thinkRaf.current); clearTimeout(statusTimer.current); statusTimer.current = 0; invoke("stop_session", { id }).catch(warn); };
   }, [id, gen]);
 
-  useEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]);
-  useEffect(() => { // list shown/hidden (Ctrl+A / Ctrl+C) or resized: re-place thread windows after layout
-    if (compact || !listRef.current) return;
-    const ro = new ResizeObserver(() => setLayout((x) => x + 1));
-    ro.observe(listRef.current);
+  useLayoutEffect(() => { if (atBottom) listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [msgs]); // before paint: no frame with the new text below the fold
+  useEffect(() => { // list shown/hidden (Ctrl+A / Ctrl+C) or resized (composer grew, a card appeared): keep the bottom in view, re-place thread windows
+    const l = listRef.current;
+    if (!l) return;
+    const ro = new ResizeObserver(() => { if (stick.current) l.scrollTo(0, l.scrollHeight); if (!compact) setLayout((x) => x + 1); });
+    ro.observe(l);
     return () => ro.disconnect();
   }, []);
   useEffect(() => {
@@ -705,7 +722,10 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     if (threads.some((t) => !t.mark)) setScrollTop(el.scrollTop); // only thread windows follow the scroll; otherwise no re-render per scroll event
-    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // any upward move lets go, even inside the 40px band: wheel/touchpad steps are a few px, and staying stuck made each delta yank it back down
+    setAtBottom(gap < 40 && !(el.scrollTop < lastTop.current && gap > 1));
+    lastTop.current = el.scrollTop;
   };
   const taRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -721,6 +741,36 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
   interruptRef.current = interrupt;
   const control = (request: object) =>
     invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(), request }) }).catch(warn);
+  /** Control request whose answer we need: resolves with `response.response`, rejects with the CLI's error. */
+  const asks = useRef(new Map<string, { ok: (r: any) => void; no: (e: Error) => void }>());
+  const askCli = (request: object) => new Promise<any>((ok, no) => {
+    const rid = crypto.randomUUID();
+    asks.current.set(rid, { ok, no });
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_request", request_id: rid, request }) }).catch((e) => { asks.current.delete(rid); no(new Error(String(e))); });
+  });
+  const dropAsks = () => { clearTimeout(mcpPoll.current.timer); mcpPoll.current.gen++; mcpPoll.current.live = false; asks.current.forEach((a) => a.no(new Error("session ended"))); asks.current.clear(); };
+  /** Re-read MCP status every 1.5 s while servers are connecting, for at least `ms`, and until `done` holds (5 min cap). */
+  const refreshMcp = (ms = 0, done?: (l: McpServer[]) => boolean) => {
+    const p = mcpPoll.current;
+    clearTimeout(p.timer);
+    const gen = ++p.gen;
+    p.live = true;
+    const t0 = Date.now();
+    const tick = () => askCli({ subtype: "mcp_status" }).then((r) => {
+      if (gen !== p.gen) return;
+      const l: McpServer[] = r?.mcpServers ?? [];
+      setMcp(l);
+      const more = l.some((s) => s.status === "pending") || Date.now() - t0 < ms || (done && !done(l));
+      if (more && Date.now() - t0 < 300_000) p.timer = window.setTimeout(tick, 1500); else p.live = false;
+    }).catch(() => { if (gen === p.gen) p.live = false; });
+    tick();
+  };
+  const answerElicit = (action: "accept" | "decline" | "cancel", content?: Record<string, unknown>) => {
+    if (!elicit) return;
+    invoke("write_line", { id, line: JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: elicit.request_id, response: { action, ...(content ? { content } : {}) } } }) }).catch(warn);
+    setElicit(null);
+  };
+  const openMcp = () => { setMcpOpen(true); refreshMcp(); };
   const answerPerm = (behavior: "allow" | "deny", always = false, updatedInput = perm?.input) => {
     if (!perm) return;
     const response = behavior === "allow"
@@ -731,6 +781,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     setPicks({});
   };
   // AskUserQuestion: the CLI's picker is a can_use_tool request; answers go back as updatedInput.answers {question: label(s)}
+  const permAnn = perm?.tool_name.startsWith("mcp__") && mcp ? mcpAnnotations(mcp, perm.tool_name) : undefined; // tool's read-only / destructive hints for the prompt
   const questions: any[] = perm?.tool_name === "AskUserQuestion" ? perm.input?.questions ?? [] : [];
   const pick = (q: any, label: string) =>
     setPicks((p) => ({ ...p, [q.question]: q.multiSelect ? (p[q.question]?.includes(label) ? p[q.question].filter((l) => l !== label) : [...(p[q.question] ?? []), label]) : [label] }));
@@ -786,6 +837,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     if (text.startsWith("!") && onTerminal) { setInput(""); onTerminal(text.slice(1)); return; } // like the CLI: `!cmd` runs in the shell
     const title = /^\/title\s+(.+)/.exec(text);
     if (title) { setInput(""); setSlash([]); onState?.({ title: title[1].trim().slice(0, 40) }); return; } // pane title (export name, notifications)
+    if (/^\/mcp\s*$/.test(text)) { setInput(""); setSlash([]); openMcp(); return; } // CLI's /mcp is interactive-only; x-term's popover does the same job
     if (/^\/config\b/.test(text)) { setInput(""); setSlash([]); invoke<string>("open_config").catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }])); return; }
     const wt = /^\/worktree\s+(\S+)/.exec(text);
     if (wt) { // git worktree next to the repo, opened as a new chat pane (parallel agents, separate branches)
@@ -870,6 +922,8 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     // permission card + empty composer: answer from the keyboard like the CLI. The send chord (Enter, or Ctrl+Enter with
     // sendKey ctrl+enter) = allow / submit / accept; the "strong" chord (Ctrl+Enter, or Ctrl+Shift+Enter in ctrl+enter mode)
     // = always allow / accept + auto-edit; Esc = deny / cancel / keep planning
+    if (e.key === "Escape" && mcpOpen) { e.preventDefault(); e.stopPropagation(); setMcpOpen(false); return; }
+    if (e.key === "Escape" && elicit && !input.trim()) { e.preventDefault(); e.stopPropagation(); answerElicit("cancel"); return; }
     if (perm && !input.trim()) {
       const enter = e.key === "Enter" && !e.altKey && !e.metaKey;
       const chord = enter && (ctrlEnter ? e.ctrlKey && !e.shiftKey : !e.ctrlKey && !e.shiftKey);
@@ -1021,7 +1075,9 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         else confirm(`Run this project's command in the shell?\n\n${cmd}`).then((ok) => { if (ok) onTerminal(cmd); });
       }
     }}>
-      <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll} onClick={(e) => { const t = e.target as HTMLElement; if (t.tagName === "IMG") setLightbox((t as HTMLImageElement).src); }}>
+      <div className="msgs" ref={listRef} onMouseUp={onMouseUp} onScroll={onScroll}
+        // intent, not position: the scroll event lands a frame late, after the next streamed delta already pulled the list back down
+        onWheel={(e) => { if (e.deltaY < 0) setAtBottom(false); }} onMouseDown={(e) => { if (e.target === e.currentTarget && e.nativeEvent.offsetX >= e.currentTarget.clientWidth) setAtBottom(false); }}onClick={(e) => { const t = e.target as HTMLElement; if (t.tagName === "IMG") setLightbox((t as HTMLImageElement).src); }}>
         {threads.length > 0 && listRef.current && (
           <div className="ruler">
             {threads.map((t) => {
@@ -1071,6 +1127,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
         ))}
         {images.length > 0 && <div className="thumbs">{images.map((im, i) => <img key={i} src={`data:${im.media_type};base64,${im.data}`} title="click to remove" onClick={() => setImages((x) => x.filter((_, j) => j !== i))} />)}</div>}
         {inspect && createPortal(<div className="help" onClick={() => setInspect(null)}><pre className="inspect">{inspect.text}</pre></div>, document.body)}
+        {elicit && <ElicitCard key={elicit.request_id} req={elicit} answer={answerElicit} />}
         {perm && plan !== null && (
           <div className="perm plan">
             <div className="perm-title">Plan ready · approve?</div>
@@ -1111,7 +1168,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
               </>
             ) : (
               <>
-                <div className="perm-title">{perm.tool_name} {perm.description ? `· ${perm.description}` : ""}</div>
+                <div className="perm-title">{perm.tool_name} {perm.description ? `· ${perm.description}` : ""}{permAnn?.destructive && <span className="mcp-danger"> destructive</span>}{permAnn?.readOnly && <span className="dim"> · read-only</span>}</div>
                 <pre>{typeof perm.input?.command === "string" ? perm.input.command : perm.input?.file_path ?? JSON.stringify(perm.input, null, 1).slice(0, 600)}</pre>
               </>
             )}
@@ -1174,9 +1231,11 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             </span>
           ))}
         </div>}
+            {mcpOpen && <McpPanel list={mcp ?? []} loading={!mcp} ask={askCli} refresh={refreshMcp} where={tilde(cwd)} onClose={() => { setMcpOpen(false); taRef.current?.focus(); }} />}
             <div className="status">
               <span dangerouslySetInnerHTML={{ __html: statusHtml || "starting…" }} />
               {ctxPct >= 80 && <span className={`ctx-tag ${ctxPct >= 90 ? "crit" : ""}`} title="context used · /compact to shrink">ctx {ctxPct}%</span>}
+              {mcp && <McpBadge list={mcp} open={mcpOpen} onClick={() => (mcpOpen ? setMcpOpen(false) : openMcp())} />}
               <span className="mode-tag" title="permission mode · Shift+Tab cycles">{mode}</span>
               <button className="browse" title="pin a folder (browse)" onClick={browseFolder}>+</button>
             </div>

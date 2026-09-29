@@ -112,3 +112,28 @@ export function hsv2hex(h: number, s: number, v: number) {
   const f = (n: number) => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
   return "#" + [f(5), f(3), f(1)].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("");
 }
+
+/** One row of the CLI's `mcp_status` control response. */
+export type McpTool = { name: string; description?: string; annotations?: { readOnly?: boolean; destructive?: boolean } };
+export type McpServer = { name: string; status: "connected" | "failed" | "needs-auth" | "pending" | "disabled"; scope?: string; source?: string; error?: string; tools?: McpTool[] };
+/** Popover groups. Plugin servers the user cannot fix (no URL, no account) go to folded groups instead of raising the badge
+ *  warning; x-term's own server is hidden (turning it off would break spawn_agents). */
+export function mcpGroups(list: McpServer[]) {
+  const g: Record<"active" | "attention" | "off" | "signin" | "unavailable", McpServer[]> = { active: [], attention: [], off: [], signin: [], unavailable: [] };
+  for (const s of list) {
+    if (s.name === "x-term") continue;
+    const plugin = s.source === "plugin" || s.name.startsWith("plugin:");
+    g[s.status === "connected" || s.status === "pending" ? "active" : s.status === "disabled" ? "off" : !plugin ? "attention" : s.status === "needs-auth" ? "signin" : "unavailable"].push(s);
+  }
+  return g;
+}
+/** "plugin:design:figma" -> figma (design), "claude.ai Gmail" -> Gmail (claude.ai), else name (scope). */
+export function mcpLabel(s: McpServer) {
+  const p = /^plugin:([^:]+):(.+)$/.exec(s.name);
+  if (p) return { name: p[2], tag: p[1] };
+  if (s.name.startsWith("claude.ai ")) return { name: s.name.slice(10), tag: "claude.ai" };
+  return { name: s.name, tag: s.scope ?? s.source ?? "" };
+}
+/** Tool name as the model sees it: mcp__<server>__<tool>, with anything outside [A-Za-z0-9_-] in the server name as "_". */
+export const mcpToolName = (server: string, tool: string) => `mcp__${server.replace(/[^A-Za-z0-9_-]/g, "_")}__${tool}`;
+export const mcpAnnotations = (list: McpServer[], full: string) => list.flatMap((s) => (s.tools ?? []).filter((t) => mcpToolName(s.name, t.name) === full))[0]?.annotations;
