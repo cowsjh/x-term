@@ -521,6 +521,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
       try { ev = JSON.parse(payload.line); } catch { return; }
       switch (ev.type) {
         case "system":
+          if (ev.subtype === "api_retry") setActivity(`Retrying (${ev.attempt}/${ev.max_retries})${ev.error ? ` · ${ev.error}` : ""}`);
           if (ev.subtype === "hook_started") setActivity(`hook ${ev.hook_name}`);
           if (ev.subtype === "hook_response" && ev.outcome && ev.outcome !== "success") setMsgs((m) => [...m, { role: "err", text: `hook ${ev.hook_name}: ${ev.outcome}${ev.stderr ? `\n${ev.stderr}` : ""}` }]);
           if (ev.subtype === "compact_boundary") { // /compact or auto-compact: older context is gone; usage resets at the next assistant message
@@ -636,7 +637,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
             if (b.type === "tool_result") {
               const t = typeof b.content === "string" ? b.content : (b.content ?? []).map((c: any) => c.text ?? "").join("\n");
               if (ev.parent_tool_use_id) { addSub(ev.parent_tool_use_id, { text: `↳ ${t}` }); continue; }
-              setActivity("Thinking");
+              setActivity("Waiting for model");
               const created = /^Task #(\d+) created successfully: (.*)$/m.exec(t);
               if (created) setTasks((tk) => ({ ...tk, [created[1]]: { subject: created[2], status: "pending" } }));
               setMsgs((m) => m.map((x) => (x.role === "tool" && x.id === b.tool_use_id ? { ...x, result: t, error: !!b.is_error } : x)));
@@ -877,7 +878,7 @@ function Chat({ id, cwd: cwdProp, resume: resumeProp, fork, quote, compact, prom
     onState?.({ busy: true });
     onLive?.({ err: false }); // new turn clears any prior error state
     turn.current = { start: Date.now(), tools: 0, done: "" };
-    setActivity("Thinking");
+    setActivity("Waiting for model");
     invoke("send_message", { id, text, images }).catch((e) => setMsgs((m) => [...m, { role: "err", text: String(e) }]));
   };
   const postRef = useRef(post); // the event listener closure is bound once per process; always call the latest post
